@@ -4,13 +4,17 @@ import app.termora.*
 import app.termora.actions.AnActionEvent
 import app.termora.actions.SettingsAction
 import com.formdev.flatlaf.FlatClientProperties
+import com.formdev.flatlaf.extras.FlatSVGIcon
 import com.formdev.flatlaf.extras.components.FlatPopupMenu
 import com.formdev.flatlaf.util.SystemInfo
+import com.jgoodies.forms.builder.FormBuilder
+import com.jgoodies.forms.layout.FormLayout
 import kotlinx.coroutines.*
 import kotlinx.coroutines.swing.Swing
 import org.apache.commons.io.FileUtils
 import org.apache.commons.lang3.StringUtils
 import org.apache.commons.lang3.exception.ExceptionUtils
+import org.apache.commons.lang3.time.DateFormatUtils
 import org.apache.sshd.sftp.client.SftpClient
 import org.apache.sshd.sftp.client.fs.SftpFileSystem
 import org.apache.sshd.sftp.client.fs.SftpPath
@@ -18,6 +22,7 @@ import org.apache.sshd.sftp.client.fs.SftpPosixFileAttributes
 import org.jdesktop.swingx.action.ActionManager
 import org.slf4j.LoggerFactory
 import java.awt.Component
+import java.awt.Dimension
 import java.awt.Insets
 import java.awt.datatransfer.DataFlavor
 import java.awt.datatransfer.StringSelection
@@ -37,6 +42,7 @@ import javax.swing.*
 import javax.swing.table.DefaultTableCellRenderer
 import kotlin.collections.ArrayDeque
 import kotlin.io.path.*
+import kotlin.math.max
 import kotlin.time.Duration.Companion.milliseconds
 
 
@@ -131,7 +137,7 @@ class FileSystemViewTable(
                         table.requestFocusInWindow()
                     }
 
-                    showContextMenu(rows, e)
+                    showContextMenu(rows.sortedArray(), e)
                 } else if (SwingUtilities.isLeftMouseButton(e) && e.clickCount % 2 == 0) {
                     val row = table.selectedRow
                     if (row <= 0 || row >= table.rowCount) return
@@ -556,22 +562,6 @@ class FileSystemViewTable(
         fileSystemViewPanel.newFolderOrFile(text, isFile)
     }
 
-    private fun transfer(
-        attrs: Array<FileSystemViewTableModel.Attr>,
-        fromLocalSystem: Boolean = false,
-        targetWorkdir: Path? = null
-    ) {
-        coroutineScope.launch {
-            try {
-                doTransfer(attrs, fromLocalSystem, targetWorkdir)
-            } catch (e: Exception) {
-                if (log.isErrorEnabled) {
-                    log.error(e.message, e)
-                }
-            }
-        }
-    }
-
     private fun deletePaths(paths: Array<Path>, rm: Boolean = false) {
         if (OptionPane.showConfirmDialog(
                 SwingUtilities.getWindowAncestor(this),
@@ -657,83 +647,250 @@ class FileSystemViewTable(
 
     }
 
+    private fun transfer(
+        attrs: Array<FileSystemViewTableModel.Attr>,
+        fromLocalSystem: Boolean = false,
+        targetWorkdir: Path? = null
+    ) {
+
+        assertEventDispatchThread()
+
+        val target = sftpPanel.getTarget(table) ?: return
+        val table = target.getData(SFTPDataProviders.FileSystemViewTable) ?: return
+        var overwriteAll = false
+
+        for (attr in attrs) {
+
+            if (!overwriteAll) {
+                val targetAttr = 0.rangeUntil(table.model.rowCount).map { table.model.getAttr(it) }
+                    .find { it.name == attr.name }
+                if (targetAttr != null) {
+                    val askTransfer = askTransfer(attr, targetAttr)
+                    if (askTransfer.option != JOptionPane.YES_OPTION) {
+                        continue
+                    }
+                    if (askTransfer.action == AskTransfer.Action.Skip) {
+                        if (askTransfer.applyAll) break
+                        continue
+                    } else if (askTransfer.action == AskTransfer.Action.Overwrite) {
+                        overwriteAll = askTransfer.applyAll
+                    }
+                }
+            }
+
+            coroutineScope.launch {
+                try {
+                    doTransfer(attr, fromLocalSystem, targetWorkdir)
+                } catch (e: Exception) {
+                    if (log.isErrorEnabled) {
+                        log.error(e.message, e)
+                    }
+                }
+            }
+        }
+
+    }
+
+    private data class AskTransfer(
+        val option: Int,
+        val action: Action,
+        val applyAll: Boolean
+    ) {
+        enum class Action {
+            Overwrite,
+            Skip
+        }
+    }
+
+    private fun askTransfer(
+        sourceAttr: FileSystemViewTableModel.Attr,
+        targetAttr: FileSystemViewTableModel.Attr
+    ): AskTransfer {
+        val formMargin = "7dlu"
+        val layout = FormLayout(
+            "left:pref, $formMargin, default:grow, 2dlu, left:pref",
+            "pref, 12dlu, pref, $formMargin, pref, $formMargin, pref, $formMargin, pref, 16dlu, pref, $formMargin, pref, $formMargin, pref, $formMargin, pref"
+        )
+
+        val iconSize = 36
+
+        val targetIcon = if (SystemInfo.isWindows)
+            NativeFileIcons.getIcon(targetAttr.name, targetAttr.isFile, iconSize, iconSize).first
+        else if (targetAttr.isDirectory) {
+            FlatSVGIcon(Icons.folder.name, iconSize, iconSize)
+        } else {
+            FlatSVGIcon(Icons.file.name, iconSize, iconSize)
+        }
+
+        val sourceIcon = if (SystemInfo.isWindows)
+            NativeFileIcons.getIcon(sourceAttr.name, sourceAttr.isFile, iconSize, iconSize).first
+        else if (sourceAttr.isDirectory) {
+            FlatSVGIcon(Icons.folder.name, iconSize, iconSize)
+        } else {
+            FlatSVGIcon(Icons.file.name, iconSize, iconSize)
+        }
+
+        val sourceModified = if (sourceAttr.modified > 0) DateFormatUtils.format(
+            Date(sourceAttr.modified),
+            "yyyy/MM/dd HH:mm"
+        ) else "-"
+
+        val targetModified = if (targetAttr.modified > 0) DateFormatUtils.format(
+            Date(targetAttr.modified),
+            "yyyy/MM/dd HH:mm"
+        ) else "-"
+
+        val actionsComBoBox = JComboBox<AskTransfer.Action>()
+        actionsComBoBox.addItem(AskTransfer.Action.Overwrite)
+        actionsComBoBox.addItem(AskTransfer.Action.Skip)
+        actionsComBoBox.renderer = object : DefaultListCellRenderer() {
+            override fun getListCellRendererComponent(
+                list: JList<*>?,
+                value: Any?,
+                index: Int,
+                isSelected: Boolean,
+                cellHasFocus: Boolean
+            ): Component {
+                var text = value?.toString() ?: StringUtils.EMPTY
+                if (value == AskTransfer.Action.Overwrite) {
+                    text = I18n.getString("termora.transport.sftp.already-exists.overwrite")
+                } else if (value == AskTransfer.Action.Skip) {
+                    text = I18n.getString("termora.transport.sftp.already-exists.skip")
+                }
+                return super.getListCellRendererComponent(list, text, index, isSelected, cellHasFocus)
+            }
+        }
+        val applyAllCheckbox = JCheckBox(I18n.getString("termora.transport.sftp.already-exists.apply-all"))
+        val box = Box.createHorizontalBox()
+        box.add(actionsComBoBox)
+        box.add(Box.createHorizontalStrut(8))
+        box.add(applyAllCheckbox)
+        box.add(Box.createHorizontalGlue())
+
+        val ttBox = Box.createVerticalBox()
+        ttBox.add(JLabel(I18n.getString("termora.transport.sftp.already-exists.message1")))
+        ttBox.add(JLabel(I18n.getString("termora.transport.sftp.already-exists.message2")))
+
+        val warningIcon = FlatSVGIcon(
+            Icons.warningIntroduction.name,
+            iconSize,
+            iconSize
+        )
+
+        var rows = 1
+        val step = 2
+        val panel = FormBuilder.create().layout(layout)
+            // tip
+            .add(JLabel(warningIcon)).xy(1, rows, "center, fill")
+            .add(ttBox).xyw(3, rows, 3).apply { rows += step }
+            // name
+            .add(JLabel("${I18n.getString("termora.transport.sftp.already-exists.name")}:")).xy(1, rows)
+            .add(sourceAttr.name).xyw(3, rows, 3).apply { rows += step }
+            // separator
+            .addSeparator(StringUtils.EMPTY).xyw(1, rows, 5).apply { rows += step }
+            // Destination
+            .add("${I18n.getString("termora.transport.sftp.already-exists.destination")}:").xy(1, rows)
+            .apply { rows += step }
+            // Folder
+            .add(JLabel(targetIcon)).xy(1, rows, "center, fill")
+            .add(targetModified).xyw(3, rows, 3).apply { rows += step }
+            // Source
+            .add("${I18n.getString("termora.transport.sftp.already-exists.source")}:").xy(1, rows)
+            .apply { rows += step }
+            // Folder
+            .add(JLabel(sourceIcon)).xy(1, rows, "center, fill")
+            .add(sourceModified).xyw(3, rows, 3).apply { rows += step }
+            // separator
+            .addSeparator(StringUtils.EMPTY).xyw(1, rows, 5).apply { rows += step }
+            // name
+            .add(JLabel("${I18n.getString("termora.transport.sftp.already-exists.actions")}:")).xy(1, rows)
+            .add(box).xyw(3, rows, 3).apply { rows += step }
+            .build()
+        panel.putClientProperty("SKIP_requestFocusInWindow", true)
+
+        return AskTransfer(
+            option = OptionPane.showConfirmDialog(
+                owner, panel,
+                messageType = JOptionPane.PLAIN_MESSAGE,
+                optionType = JOptionPane.OK_CANCEL_OPTION,
+                title = sourceAttr.name,
+                initialValue = JOptionPane.YES_OPTION,
+            ) {
+                it.size = Dimension(max(UIManager.getInt("Dialog.width") - 220, it.width), it.height)
+            },
+            action = actionsComBoBox.selectedItem as AskTransfer.Action,
+            applyAll = applyAllCheckbox.isSelected
+        )
+
+    }
+
 
     /**
      * 开始查找所有子，查找到之后立即添加任务，如果添加失败（任意一个）那么立即终止
      */
     private fun doTransfer(
-        attrs: Array<FileSystemViewTableModel.Attr>,
+        attr: FileSystemViewTableModel.Attr,
         fromLocalSystem: Boolean,
         targetWorkdir: Path?
     ) {
-        if (attrs.isEmpty()) return
         val sftpPanel = this.sftpPanel
         val target = sftpPanel.getTarget(table) ?: return
-        var isTerminate = false
+
+        /**
+         * 定义一个添加器，它可以自动的判断导入/拖拽行为
+         */
+        val adder = object {
+            fun add(transport: Transport): Boolean {
+                return addTransport(
+                    sftpPanel,
+                    if (fromLocalSystem) attr.path.parent else null,
+                    target,
+                    targetWorkdir,
+                    transport
+                )
+            }
+        }
+
+        if (attr.isFile) {
+            adder.add(createTransport(attr.path, false, 0).apply { scanned() })
+            return
+        }
+
         val queue = ArrayDeque<Transport>()
+        var isTerminate = false
 
-        for (attr in attrs) {
-
-            /**
-             * 定义一个添加器，它可以自动的判断导入/拖拽行为
-             */
-            val adder = object {
-                fun add(transport: Transport): Boolean {
-                    return addTransport(
-                        sftpPanel,
-                        if (fromLocalSystem) attr.path.parent else null,
-                        target,
-                        targetWorkdir,
-                        transport
-                    )
+        try {
+            walk(attr.path, object : FileVisitor<Path> {
+                override fun preVisitDirectory(dir: Path, attrs: BasicFileAttributes): FileVisitResult {
+                    val transport = createTransport(dir, true, queue.lastOrNull()?.id ?: 0L)
+                        .apply { queue.addLast(this) }
+                    if (adder.add(transport)) return FileVisitResult.CONTINUE
+                    return FileVisitResult.TERMINATE.apply { isTerminate = true }
                 }
-            }
 
-            if (attr.isFile) {
-                if (!adder.add(createTransport(attr.path, false, 0).apply { scanned() })) {
-                    isTerminate = true
-                    break
+                override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
+                    if (queue.isEmpty()) return FileVisitResult.SKIP_SIBLINGS
+                    val transport = createTransport(file, false, queue.last().id).apply { scanned() }
+                    if (adder.add(transport)) return FileVisitResult.CONTINUE
+                    return FileVisitResult.TERMINATE.apply { isTerminate = true }
                 }
-                continue
-            }
 
-            queue.clear()
-
-            try {
-                walk(attr.path, object : FileVisitor<Path> {
-                    override fun preVisitDirectory(dir: Path, attrs: BasicFileAttributes): FileVisitResult {
-                        val transport = createTransport(dir, true, queue.lastOrNull()?.id ?: 0L)
-                            .apply { queue.addLast(this) }
-                        if (adder.add(transport)) return FileVisitResult.CONTINUE
-                        return FileVisitResult.TERMINATE.apply { isTerminate = true }
-                    }
-
-                    override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
-                        if (queue.isEmpty()) return FileVisitResult.SKIP_SIBLINGS
-                        val transport = createTransport(file, false, queue.last().id).apply { scanned() }
-                        if (adder.add(transport)) return FileVisitResult.CONTINUE
-                        return FileVisitResult.TERMINATE.apply { isTerminate = true }
-                    }
-
-                    override fun visitFileFailed(file: Path, exc: IOException): FileVisitResult {
-                        return FileVisitResult.CONTINUE
-                    }
-
-                    override fun postVisitDirectory(dir: Path, exc: IOException?): FileVisitResult {
-                        // 标记为扫描完毕
-                        queue.removeLast().scanned()
-                        return FileVisitResult.CONTINUE
-                    }
-
-                })
-            } catch (e: Exception) {
-                if (log.isErrorEnabled) {
-                    log.error(e.message, e)
+                override fun visitFileFailed(file: Path, exc: IOException): FileVisitResult {
+                    return FileVisitResult.CONTINUE
                 }
-                isTerminate = true
-            }
 
-            if (isTerminate) break
+                override fun postVisitDirectory(dir: Path, exc: IOException?): FileVisitResult {
+                    // 标记为扫描完毕
+                    queue.removeLast().scanned()
+                    return FileVisitResult.CONTINUE
+                }
+
+            })
+        } catch (e: Exception) {
+            if (log.isErrorEnabled) {
+                log.error(e.message, e)
+            }
+            isTerminate = true
         }
 
         if (isTerminate) {
@@ -793,7 +950,11 @@ class FileSystemViewTable(
         targetWorkdir: Path?,
         transport: Transport
     ): Boolean {
-        return sftpPanel.addTransport(table, sourceWorkdir, target, targetWorkdir, transport)
+        return try {
+            sftpPanel.addTransport(table, sourceWorkdir, target, targetWorkdir, transport)
+        } catch (e: Exception) {
+            false
+        }
     }
 
     private fun createTransport(source: Path, isDirectory: Boolean, parentId: Long): Transport {
