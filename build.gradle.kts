@@ -67,6 +67,7 @@ dependencies {
     implementation(libs.commons.net)
     implementation(libs.commons.text)
     implementation(libs.commons.compress)
+    implementation(libs.commons.vfs2) { exclude(group = "*", module = "*") }
     implementation(libs.kotlinx.coroutines.swing)
     implementation(libs.kotlinx.coroutines.core)
 
@@ -104,6 +105,8 @@ dependencies {
     implementation(libs.commonmark)
     implementation(libs.jgit)
     implementation(libs.jgit.sshd) { exclude(group = "*", module = "sshd-osgi") }
+    implementation(libs.jgit.agent) { exclude(group = "*", module = "sshd-osgi") }
+    implementation(libs.eddsa)
     implementation(libs.jnafilechooser)
     implementation(libs.xodus.vfs)
     implementation(libs.xodus.openAPI)
@@ -123,6 +126,7 @@ application {
         "-XX:+ZUncommit",
         "-XX:+ZGenerational",
         "-XX:ZUncommitDelay=60",
+        "-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005"
     )
 
     if (os.isMacOsX) {

@@ -2,6 +2,7 @@ package app.termora
 
 import app.termora.actions.ActionManager
 import app.termora.keymap.KeymapManager
+import app.termora.vfs2.sftp.MySftpFileProvider
 import com.formdev.flatlaf.FlatClientProperties
 import com.formdev.flatlaf.FlatSystemProperties
 import com.formdev.flatlaf.extras.FlatDesktop
@@ -12,13 +13,15 @@ import com.jthemedetecor.OsThemeDetector
 import com.mixpanel.mixpanelapi.ClientDelivery
 import com.mixpanel.mixpanelapi.MessageBuilder
 import com.mixpanel.mixpanelapi.MixpanelAPI
-import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.launch
 import org.apache.commons.io.FileUtils
 import org.apache.commons.lang3.LocaleUtils
 import org.apache.commons.lang3.SystemUtils
+import org.apache.commons.vfs2.VFS
+import org.apache.commons.vfs2.cache.WeakRefFilesCache
+import org.apache.commons.vfs2.impl.DefaultFileSystemManager
+import org.apache.commons.vfs2.provider.local.DefaultLocalFileProvider
 import org.json.JSONObject
 import org.slf4j.LoggerFactory
 import java.awt.MenuItem
@@ -50,11 +53,17 @@ class ApplicationRunner {
             // 统计
             val enableAnalytics = measureTimeMillis { enableAnalytics() }
 
-            // init ActionManager、KeymapManager
-            @Suppress("OPT_IN_USAGE")
-            GlobalScope.launch(Dispatchers.IO) {
+            // init ActionManager、KeymapManager、VFS
+            swingCoroutineScope.launch(Dispatchers.IO) {
                 ActionManager.getInstance()
                 KeymapManager.getInstance()
+
+                val fileSystemManager = DefaultFileSystemManager()
+                fileSystemManager.addProvider("sftp", MySftpFileProvider())
+                fileSystemManager.addProvider("file", DefaultLocalFileProvider())
+                fileSystemManager.filesCache = WeakRefFilesCache()
+                fileSystemManager.init()
+                VFS.setManager(fileSystemManager)
             }
 
             // 设置 LAF
@@ -89,9 +98,8 @@ class ApplicationRunner {
         }
     }
 
-    @Suppress("OPT_IN_USAGE")
     private fun clearTemporary() {
-        GlobalScope.launch(Dispatchers.IO) {
+        swingCoroutineScope.launch(Dispatchers.IO) {
             // 启动时清除
             FileUtils.cleanDirectory(Application.getTemporaryDir())
         }
@@ -273,13 +281,12 @@ class ApplicationRunner {
     /**
      * 统计 https://mixpanel.com
      */
-    @OptIn(DelicateCoroutinesApi::class)
     private fun enableAnalytics() {
         if (Application.isUnknownVersion()) {
             return
         }
 
-        GlobalScope.launch(Dispatchers.IO) {
+        swingCoroutineScope.launch(Dispatchers.IO) {
             try {
                 val properties = JSONObject()
                 properties.put("os", SystemUtils.OS_NAME)

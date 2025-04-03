@@ -16,7 +16,7 @@ import kotlin.math.max
 class RequestAuthenticationDialog(owner: Window, host: Host) : DialogWrapper(owner) {
 
     private val authenticationTypeComboBox = FlatComboBox<AuthenticationType>()
-    private val rememberCheckBox = JCheckBox("Remember")
+    private val rememberCheckBox = JCheckBox(I18n.getString("termora.new-host.general.remember"))
     private val passwordPanel = JPanel(BorderLayout())
     private val passwordPasswordField = OutlinePasswordField()
     private val usernameTextField = OutlineTextField()
@@ -34,8 +34,8 @@ class RequestAuthenticationDialog(owner: Window, host: Host) : DialogWrapper(own
         pack()
 
         size = Dimension(max(380, size.width), size.height)
-
-        setLocationRelativeTo(null)
+        preferredSize = size
+        minimumSize = size
 
         publicKeyComboBox.renderer = object : DefaultListCellRenderer() {
             override fun getListCellRendererComponent(
@@ -63,6 +63,10 @@ class RequestAuthenticationDialog(owner: Window, host: Host) : DialogWrapper(own
             if (it.stateChange == ItemEvent.SELECTED) {
                 switchPasswordComponent()
             }
+        }
+
+        if (host.authentication.type != AuthenticationType.No) {
+            authenticationTypeComboBox.selectedItem = host.authentication.type
         }
 
         usernameTextField.text = host.username
