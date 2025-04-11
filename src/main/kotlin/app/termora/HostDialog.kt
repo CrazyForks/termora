@@ -2,9 +2,10 @@ package app.termora
 
 import app.termora.actions.AnAction
 import app.termora.actions.AnActionEvent
-import app.termora.keyboardinteractive.TerminalUserInteraction
-import kotlinx.coroutines.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.swing.Swing
+import kotlinx.coroutines.withContext
 import org.apache.commons.lang3.exception.ExceptionUtils
 import org.apache.sshd.client.SshClient
 import org.apache.sshd.client.session.ClientSession
@@ -52,8 +53,7 @@ class HostDialog(owner: Window, host: Host? = null) : DialogWrapper(owner) {
                 putValue(NAME, "${I18n.getString("termora.new-host.test-connection")}...")
                 isEnabled = false
 
-                @OptIn(DelicateCoroutinesApi::class)
-                GlobalScope.launch(Dispatchers.IO) {
+                swingCoroutineScope.launch(Dispatchers.IO) {
                     testConnection(pane.getHost())
                     withContext(Dispatchers.Swing) {
                         putValue(NAME, I18n.getString("termora.new-host.test-connection"))
@@ -103,8 +103,7 @@ class HostDialog(owner: Window, host: Host? = null) : DialogWrapper(owner) {
         var client: SshClient? = null
         var session: ClientSession? = null
         try {
-            client = SshClients.openClient(host)
-            client.userInteraction = TerminalUserInteraction(owner)
+            client = SshClients.openClient(host, this)
             session = SshClients.openSession(host, client)
         } finally {
             session?.close()
