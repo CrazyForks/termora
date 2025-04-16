@@ -1,10 +1,21 @@
 package app.termora
 
+import app.termora.native.osx.NativeMacLibrary
+import com.formdev.flatlaf.ui.FlatNativeWindowsLibrary
 import com.formdev.flatlaf.util.SystemInfo
+import com.sun.jna.Pointer
+import com.sun.jna.platform.win32.User32
+import com.sun.jna.platform.win32.WinDef
+import com.sun.jna.platform.win32.WinUser.*
+import de.jangassen.jfa.ThreadUtils
+import de.jangassen.jfa.foundation.Foundation
+import de.jangassen.jfa.foundation.ID
 import org.slf4j.LoggerFactory
 import java.awt.Frame
+import java.awt.Window
 import java.awt.event.WindowAdapter
 import java.awt.event.WindowEvent
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.swing.JFrame
 import javax.swing.JOptionPane
 import javax.swing.SwingUtilities
@@ -13,7 +24,8 @@ import javax.swing.WindowConstants.DO_NOTHING_ON_CLOSE
 import kotlin.math.max
 import kotlin.system.exitProcess
 
-class TermoraFrameManager {
+
+class TermoraFrameManager : Disposable {
 
     companion object {
         private val log = LoggerFactory.getLogger(TermoraFrameManager::class.java)
@@ -26,6 +38,7 @@ class TermoraFrameManager {
 
     private val frames = mutableListOf<TermoraFrame>()
     private val properties get() = Database.getDatabase().properties
+    private val isDisposed = AtomicBoolean(false)
     private val isBackgroundRunning get() = Database.getDatabase().appearance.backgroundRunning
 
     fun createWindow(): TermoraFrame {
@@ -51,6 +64,15 @@ class TermoraFrameManager {
             }
         }
 
+        frame.addNotifyListener(object : NotifyListener {
+            private val opacity get() = Database.getDatabase().appearance.opacity
+            override fun addNotify() {
+                val opacity = this.opacity
+                if (opacity >= 1.0) return
+                setOpacity(frame, opacity)
+            }
+        })
+
         return frame.apply { frames.add(this) }
     }
 
@@ -60,6 +82,7 @@ class TermoraFrameManager {
 
 
     private fun registerCloseCallback(window: TermoraFrame) {
+        val manager = this
         window.addWindowListener(object : WindowAdapter() {
             override fun windowClosed(e: WindowEvent) {
 
@@ -75,31 +98,49 @@ class TermoraFrameManager {
                 Disposer.dispose(windowScope)
 
                 val windowScopes = ApplicationScope.windowScopes()
+                if (windowScopes.isNotEmpty()) {
+                    return
+                }
 
                 // 如果已经没有 Window 域了，那么就可以退出程序了
-                if (windowScopes.isEmpty()) {
-                    this@TermoraFrameManager.dispose()
+                if (SystemInfo.isWindows || SystemInfo.isLinux) {
+                    Disposer.dispose(manager)
+                } else if (SystemInfo.isMacOS) {
+                    // 如果 macOS 开启了后台运行，那么尽管所有窗口都没了，也不会退出
+                    if (isBackgroundRunning) {
+                        return
+                    }
+                    Disposer.dispose(manager)
                 }
             }
 
             override fun windowClosing(e: WindowEvent) {
-                if (ApplicationScope.windowScopes().size == 1) {
-                    if (SystemInfo.isWindows && isBackgroundRunning) {
-                        // 最小化
-                        window.extendedState = window.extendedState or JFrame.ICONIFIED
-                        // 隐藏
-                        window.isVisible = false
-                    } else {
-                        if (OptionPane.showConfirmDialog(
-                                window,
-                                I18n.getString("termora.quit-confirm", Application.getName()),
-                                optionType = JOptionPane.YES_NO_OPTION,
-                            ) == JOptionPane.YES_OPTION
-                        ) {
-                            window.dispose()
-                        }
-                    }
-                } else {
+                if (ApplicationScope.windowScopes().size != 1) {
+                    window.dispose()
+                    return
+                }
+
+                // 如果 Windows 开启了后台运行，那么最小化
+                if (SystemInfo.isWindows && isBackgroundRunning) {
+                    // 最小化
+                    window.extendedState = window.extendedState or JFrame.ICONIFIED
+                    // 隐藏
+                    window.isVisible = false
+                    return
+                }
+
+                // 如果 macOS 已经开启了后台运行，那么直接销毁，因为会有一个进程驻守
+                if (SystemInfo.isMacOS && isBackgroundRunning) {
+                    window.dispose()
+                    return
+                }
+
+                val option = OptionPane.showConfirmDialog(
+                    window,
+                    I18n.getString("termora.quit-confirm", Application.getName()),
+                    optionType = JOptionPane.YES_NO_OPTION,
+                )
+                if (option == JOptionPane.YES_OPTION) {
                     window.dispose()
                 }
             }
@@ -122,14 +163,16 @@ class TermoraFrameManager {
         }
     }
 
-    private fun dispose() {
-        Disposer.dispose(ApplicationScope.forApplicationScope())
+    override fun dispose() {
+        if (isDisposed.compareAndSet(false, true)) {
+            Disposer.dispose(ApplicationScope.forApplicationScope())
 
-        try {
-            Disposer.getTree().assertIsEmpty(true)
-        } catch (e: Exception) {
-            if (log.isErrorEnabled) {
-                log.error(e.message, e)
+            try {
+                Disposer.getTree().assertIsEmpty(true)
+            } catch (e: Exception) {
+                if (log.isErrorEnabled) {
+                    log.error(e.message, e)
+                }
             }
         }
 
@@ -151,6 +194,31 @@ class TermoraFrameManager {
         val h = properties.getString("TermoraFrame.height")?.toIntOrNull() ?: return null
         val s = properties.getString("TermoraFrame.extendedState")?.toIntOrNull() ?: return null
         return FrameRectangle(x, y, w, h, s)
+    }
+
+    fun setOpacity(opacity: Double) {
+        if (opacity < 0 || opacity > 1 || SystemInfo.isLinux) return
+        for (window in getWindows()) {
+            setOpacity(window, opacity)
+        }
+    }
+
+    private fun setOpacity(window: Window, opacity: Double) {
+        if (SystemInfo.isMacOS) {
+            val nsWindow = ID(NativeMacLibrary.getNSWindow(window) ?: return)
+            ThreadUtils.dispatch_async {
+                Foundation.invoke(nsWindow, "setOpaque:", false)
+                Foundation.invoke(nsWindow, "setAlphaValue:", opacity)
+            }
+        } else if (SystemInfo.isWindows) {
+            val alpha = ((opacity * 255).toInt() and 0xFF).toByte()
+            val hwnd = WinDef.HWND(Pointer.createConstant(FlatNativeWindowsLibrary.getHWND(window)))
+            val exStyle = User32.INSTANCE.GetWindowLong(hwnd, User32.GWL_EXSTYLE)
+            if (exStyle and WS_EX_LAYERED == 0) {
+                User32.INSTANCE.SetWindowLong(hwnd, GWL_EXSTYLE, exStyle or WS_EX_LAYERED)
+            }
+            User32.INSTANCE.SetLayeredWindowAttributes(hwnd, 0, alpha, LWA_ALPHA)
+        }
     }
 
     private data class FrameRectangle(

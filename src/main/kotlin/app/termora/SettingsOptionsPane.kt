@@ -18,10 +18,7 @@ import app.termora.native.FileChooser
 import app.termora.sftp.SFTPTab
 import app.termora.snippet.Snippet
 import app.termora.snippet.SnippetManager
-import app.termora.sync.SyncConfig
-import app.termora.sync.SyncRange
-import app.termora.sync.SyncType
-import app.termora.sync.SyncerProvider
+import app.termora.sync.*
 import app.termora.terminal.CursorStyle
 import app.termora.terminal.DataKey
 import app.termora.terminal.panel.FloatingToolbarPanel
@@ -36,10 +33,14 @@ import com.jgoodies.forms.builder.FormBuilder
 import com.jgoodies.forms.layout.FormLayout
 import com.jthemedetecor.OsThemeDetector
 import com.sun.jna.LastErrorException
-import kotlinx.coroutines.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.swing.Swing
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
 import org.apache.commons.codec.binary.Base64
+import org.apache.commons.io.FileUtils
+import org.apache.commons.io.FilenameUtils
 import org.apache.commons.io.IOUtils
 import org.apache.commons.lang3.StringUtils
 import org.apache.commons.lang3.SystemUtils
@@ -58,12 +59,14 @@ import java.awt.event.ItemListener
 import java.io.File
 import java.net.URI
 import java.nio.charset.StandardCharsets
+import java.nio.file.StandardCopyOption
 import java.util.*
+import java.util.function.Consumer
 import javax.swing.*
+import javax.swing.JSpinner.NumberEditor
 import javax.swing.event.DocumentEvent
 import javax.swing.event.PopupMenuEvent
 import javax.swing.event.PopupMenuListener
-import kotlin.time.Duration.Companion.milliseconds
 
 
 class SettingsOptionsPane : OptionsPane() {
@@ -79,7 +82,6 @@ class SettingsOptionsPane : OptionsPane() {
     companion object {
         private val log = LoggerFactory.getLogger(SettingsOptionsPane::class.java)
         private val localShells by lazy { loadShells() }
-        var pulled = false
 
         private fun loadShells(): List<String> {
             val shells = mutableListOf<String>()
@@ -132,7 +134,12 @@ class SettingsOptionsPane : OptionsPane() {
         val backgroundComBoBox = YesOrNoComboBox()
         val followSystemCheckBox = JCheckBox(I18n.getString("termora.settings.appearance.follow-system"))
         val preferredThemeBtn = JButton(Icons.settings)
+        val opacitySpinner = NumberSpinner(100, 0, 100)
+        val backgroundImageTextField = OutlineTextField()
+
         private val appearance get() = database.appearance
+        private val backgroundButton = JButton(Icons.folder)
+        private val backgroundClearButton = FlatButton()
 
         init {
             initView()
@@ -140,6 +147,35 @@ class SettingsOptionsPane : OptionsPane() {
         }
 
         private fun initView() {
+
+            backgroundComBoBox.isEnabled = SystemInfo.isWindows || SystemInfo.isMacOS
+            backgroundImageTextField.isEditable = false
+            backgroundImageTextField.trailingComponent = backgroundButton
+            backgroundImageTextField.text = FilenameUtils.getName(appearance.backgroundImage)
+            backgroundImageTextField.document.addDocumentListener(object : DocumentAdaptor() {
+                override fun changedUpdate(e: DocumentEvent) {
+                    backgroundClearButton.isEnabled = backgroundImageTextField.text.isNotBlank()
+                }
+            })
+
+            backgroundClearButton.isFocusable = false
+            backgroundClearButton.isEnabled = backgroundImageTextField.text.isNotBlank()
+            backgroundClearButton.icon = Icons.delete
+            backgroundClearButton.buttonType = FlatButton.ButtonType.toolBarButton
+
+
+            opacitySpinner.isEnabled = SystemInfo.isMacOS || SystemInfo.isWindows
+            opacitySpinner.model = object : SpinnerNumberModel(appearance.opacity, 0.1, 1.0, 0.1) {
+                override fun getNextValue(): Any {
+                    return super.getNextValue() ?: maximum
+                }
+
+                override fun getPreviousValue(): Any {
+                    return super.getPreviousValue() ?: minimum
+                }
+            }
+            opacitySpinner.editor = NumberEditor(opacitySpinner, "#.##")
+            opacitySpinner.model.stepSize = 0.05
 
             followSystemCheckBox.isSelected = appearance.followSystem
             preferredThemeBtn.isEnabled = followSystemCheckBox.isSelected
@@ -180,6 +216,14 @@ class SettingsOptionsPane : OptionsPane() {
                 }
             }
 
+            opacitySpinner.addChangeListener {
+                val opacity = opacitySpinner.value
+                if (opacity is Double) {
+                    TermoraFrameManager.getInstance().setOpacity(opacity)
+                    appearance.opacity = opacity
+                }
+            }
+
             backgroundComBoBox.addItemListener {
                 if (it.stateChange == ItemEvent.SELECTED) {
                     appearance.backgroundRunning = backgroundComBoBox.selectedItem as Boolean
@@ -215,6 +259,46 @@ class SettingsOptionsPane : OptionsPane() {
             }
 
             preferredThemeBtn.addActionListener { showPreferredThemeContextmenu() }
+
+            backgroundButton.addActionListener {
+                val chooser = FileChooser()
+                chooser.osxAllowedFileTypes = listOf("png", "jpg", "jpeg")
+                chooser.allowsMultiSelection = false
+                chooser.win32Filters.add(Pair("Image files", listOf("png", "jpg", "jpeg")))
+                chooser.fileSelectionMode = JFileChooser.FILES_ONLY
+                chooser.showOpenDialog(owner).thenAccept {
+                    if (it.isNotEmpty()) {
+                        onSelectedBackgroundImage(it.first())
+                    }
+                }
+            }
+
+            backgroundClearButton.addActionListener {
+                BackgroundManager.getInstance().clearBackgroundImage()
+                backgroundImageTextField.text = StringUtils.EMPTY
+            }
+        }
+
+        private fun onSelectedBackgroundImage(file: File) {
+            try {
+                val destFile = FileUtils.getFile(Application.getBaseDataDir(), "background", file.name)
+                FileUtils.forceMkdirParent(destFile)
+                FileUtils.deleteQuietly(destFile)
+                FileUtils.copyFile(file, destFile, StandardCopyOption.REPLACE_EXISTING)
+                backgroundImageTextField.text = destFile.name
+                BackgroundManager.getInstance().setBackgroundImage(destFile)
+            } catch (e: Exception) {
+                if (log.isErrorEnabled) {
+                    log.error(e.message, e)
+                }
+                SwingUtilities.invokeLater {
+                    OptionPane.showMessageDialog(
+                        owner,
+                        ExceptionUtils.getRootCauseMessage(e),
+                        messageType = JOptionPane.ERROR_MESSAGE
+                    )
+                }
+            }
         }
 
         override fun getIcon(isSelected: Boolean): Icon {
@@ -284,7 +368,7 @@ class SettingsOptionsPane : OptionsPane() {
         private fun getFormPanel(): JPanel {
             val layout = FormLayout(
                 "left:pref, $formMargin, default:grow, $formMargin, default, default:grow",
-                "pref, $formMargin, pref, $formMargin, pref"
+                "pref, $formMargin, pref, $formMargin, pref, $formMargin, pref, $formMargin, pref"
             )
             val box = FlatToolBar()
             box.add(followSystemCheckBox)
@@ -305,10 +389,19 @@ class SettingsOptionsPane : OptionsPane() {
                     }
                 })).xy(5, rows).apply { rows += step }
 
-            if (SystemInfo.isWindows) {
-                builder.add("${I18n.getString("termora.settings.appearance.background-running")}:").xy(1, rows)
-                    .add(backgroundComBoBox).xy(3, rows)
-            }
+
+            val bgClearBox = Box.createHorizontalBox()
+            bgClearBox.add(backgroundClearButton)
+            builder.add("${I18n.getString("termora.settings.appearance.background-image")}:").xy(1, rows)
+                .add(backgroundImageTextField).xy(3, rows)
+                .add(bgClearBox).xy(5, rows)
+                .apply { rows += step }
+
+            builder.add("${I18n.getString("termora.settings.appearance.opacity")}:").xy(1, rows)
+                .add(opacitySpinner).xy(3, rows).apply { rows += step }
+
+            builder.add("${I18n.getString("termora.settings.appearance.background-running")}:").xy(1, rows)
+                .add(backgroundComBoBox).xy(3, rows)
 
             return builder.build()
         }
@@ -567,11 +660,11 @@ class SettingsOptionsPane : OptionsPane() {
         val typeComboBox = FlatComboBox<SyncType>()
         val tokenTextField = OutlinePasswordField(255)
         val gistTextField = OutlineTextField(255)
+        val policyComboBox = JComboBox<SyncPolicy>()
         val domainTextField = OutlineTextField(255)
-        val uploadConfigButton = JButton(I18n.getString("termora.settings.sync.push"), Icons.upload)
+        val syncConfigButton = JButton(I18n.getString("termora.settings.sync"), Icons.settingSync)
         val exportConfigButton = JButton(I18n.getString("termora.settings.sync.export"), Icons.export)
         val importConfigButton = JButton(I18n.getString("termora.settings.sync.import"), Icons.import)
-        val downloadConfigButton = JButton(I18n.getString("termora.settings.sync.pull"), Icons.download)
         val lastSyncTimeLabel = JLabel()
         val sync get() = database.sync
         val hostsCheckBox = JCheckBox(I18n.getString("termora.welcome.my-hosts"))
@@ -589,19 +682,23 @@ class SettingsOptionsPane : OptionsPane() {
             add(getCenterComponent(), BorderLayout.CENTER)
         }
 
-        @OptIn(DelicateCoroutinesApi::class)
         private fun initEvents() {
-            downloadConfigButton.addActionListener {
-                GlobalScope.launch(Dispatchers.IO) {
-                    pushOrPull(false)
+            syncConfigButton.addActionListener(object : AbstractAction() {
+                override fun actionPerformed(e: ActionEvent) {
+                    if (typeComboBox.selectedItem == SyncType.WebDAV) {
+                        if (tokenTextField.password.isEmpty()) {
+                            tokenTextField.outline = FlatClientProperties.OUTLINE_ERROR
+                            tokenTextField.requestFocusInWindow()
+                            return
+                        } else if (gistTextField.text.isEmpty()) {
+                            gistTextField.outline = FlatClientProperties.OUTLINE_ERROR
+                            gistTextField.requestFocusInWindow()
+                            return
+                        }
+                    }
+                    swingCoroutineScope.launch(Dispatchers.IO) { sync() }
                 }
-            }
-
-            uploadConfigButton.addActionListener {
-                GlobalScope.launch(Dispatchers.IO) {
-                    pushOrPull(true)
-                }
-            }
+            })
 
             typeComboBox.addItemListener {
                 if (it.stateChange == ItemEvent.SELECTED) {
@@ -617,6 +714,12 @@ class SettingsOptionsPane : OptionsPane() {
                     add(getCenterComponent(), BorderLayout.CENTER)
                     revalidate()
                     repaint()
+                }
+            }
+
+            policyComboBox.addItemListener {
+                if (it.stateChange == ItemEvent.SELECTED) {
+                    sync.policy = (policyComboBox.selectedItem as SyncPolicy).name
                 }
             }
 
@@ -639,6 +742,7 @@ class SettingsOptionsPane : OptionsPane() {
                     gistTextField.trailingComponent = if (gistTextField.text.isNotBlank()) visitGistBtn else null
                 }
             })
+
 
             visitGistBtn.addActionListener {
                 if (typeComboBox.selectedItem == SyncType.GitLab) {
@@ -686,17 +790,47 @@ class SettingsOptionsPane : OptionsPane() {
 
         }
 
+        private suspend fun sync() {
+
+            // 如果 gist 为空说明要创建一个 gist
+            if (gistTextField.text.isBlank()) {
+                if (!pushOrPull(true)) return
+            } else {
+                if (!pushOrPull(false)) return
+                if (!pushOrPull(true)) return
+            }
+
+            withContext(Dispatchers.Swing) {
+                if (hostsCheckBox.isSelected) {
+                    for (window in TermoraFrameManager.getInstance().getWindows()) {
+                        visit(window.rootPane) {
+                            if (it is NewHostTree) it.refreshNode()
+                        }
+                    }
+                }
+                OptionPane.showMessageDialog(owner, message = I18n.getString("termora.settings.sync.done"))
+            }
+        }
+
+        private fun visit(c: JComponent, consumer: Consumer<JComponent>) {
+            for (e in c.components) {
+                if (e is JComponent) {
+                    consumer.accept(e)
+                    visit(e, consumer)
+                }
+            }
+        }
+
         private fun refreshButtons() {
             sync.rangeKeyPairs = keysCheckBox.isSelected
             sync.rangeHosts = hostsCheckBox.isSelected
             sync.rangeSnippets = snippetsCheckBox.isSelected
             sync.rangeKeywordHighlights = keywordHighlightsCheckBox.isSelected
 
-            downloadConfigButton.isEnabled = keysCheckBox.isSelected || hostsCheckBox.isSelected
+            syncConfigButton.isEnabled = keysCheckBox.isSelected || hostsCheckBox.isSelected
                     || keywordHighlightsCheckBox.isSelected
-            uploadConfigButton.isEnabled = downloadConfigButton.isEnabled
-            exportConfigButton.isEnabled = downloadConfigButton.isEnabled
-            importConfigButton.isEnabled = downloadConfigButton.isEnabled
+            exportConfigButton.isEnabled = syncConfigButton.isEnabled
+            importConfigButton.isEnabled = syncConfigButton.isEnabled
         }
 
         private fun export() {
@@ -1022,8 +1156,11 @@ class SettingsOptionsPane : OptionsPane() {
             )
         }
 
+        /**
+         * @return true 同步成功
+         */
         @Suppress("DuplicatedCode")
-        private suspend fun pushOrPull(push: Boolean) {
+        private suspend fun pushOrPull(push: Boolean): Boolean {
 
             if (typeComboBox.selectedItem == SyncType.GitLab) {
                 if (domainTextField.text.isBlank()) {
@@ -1031,7 +1168,7 @@ class SettingsOptionsPane : OptionsPane() {
                         domainTextField.outline = "error"
                         domainTextField.requestFocusInWindow()
                     }
-                    return
+                    return false
                 }
             }
 
@@ -1040,7 +1177,7 @@ class SettingsOptionsPane : OptionsPane() {
                     tokenTextField.outline = "error"
                     tokenTextField.requestFocusInWindow()
                 }
-                return
+                return false
             }
 
             if (gistTextField.text.isBlank() && !push) {
@@ -1048,39 +1185,13 @@ class SettingsOptionsPane : OptionsPane() {
                     gistTextField.outline = "error"
                     gistTextField.requestFocusInWindow()
                 }
-                return
-            }
-
-
-            // 没有拉取过 && 是推送 && gistId 不为空
-            if (!pulled && push && gistTextField.text.isNotBlank()) {
-                val code = withContext(Dispatchers.Swing) {
-                    // 提示第一次推送
-                    OptionPane.showConfirmDialog(
-                        owner,
-                        I18n.getString("termora.settings.sync.push-warning"),
-                        messageType = JOptionPane.WARNING_MESSAGE,
-                        optionType = JOptionPane.YES_NO_CANCEL_OPTION,
-                        options = arrayOf(
-                            uploadConfigButton.text,
-                            downloadConfigButton.text,
-                            I18n.getString("termora.cancel")
-                        ),
-                        initialValue = I18n.getString("termora.cancel")
-                    )
-                }
-                when (code) {
-                    -1, JOptionPane.CANCEL_OPTION -> return
-                    JOptionPane.NO_OPTION -> pushOrPull(false) // pull
-                    JOptionPane.YES_OPTION -> pulled = true // force push
-                }
+                return false
             }
 
             withContext(Dispatchers.Swing) {
                 exportConfigButton.isEnabled = false
                 importConfigButton.isEnabled = false
-                downloadConfigButton.isEnabled = false
-                uploadConfigButton.isEnabled = false
+                syncConfigButton.isEnabled = false
                 typeComboBox.isEnabled = false
                 gistTextField.isEnabled = false
                 tokenTextField.isEnabled = false
@@ -1091,19 +1202,14 @@ class SettingsOptionsPane : OptionsPane() {
                 hostsCheckBox.isEnabled = false
                 snippetsCheckBox.isEnabled = false
                 domainTextField.isEnabled = false
-
-                if (push) {
-                    uploadConfigButton.text = "${I18n.getString("termora.settings.sync.push")}..."
-                } else {
-                    downloadConfigButton.text = "${I18n.getString("termora.settings.sync.pull")}..."
-                }
+                syncConfigButton.text = "${I18n.getString("termora.settings.sync")}..."
             }
 
             val syncConfig = getSyncConfig()
 
             // sync
             val syncResult = kotlin.runCatching {
-                val syncer = SyncerProvider.getInstance().getSyncer(syncConfig.type)
+                val syncer = SyncManager.getInstance()
                 if (push) {
                     syncer.push(syncConfig)
                 } else {
@@ -1113,10 +1219,9 @@ class SettingsOptionsPane : OptionsPane() {
 
             // 恢复状态
             withContext(Dispatchers.Swing) {
-                downloadConfigButton.isEnabled = true
+                syncConfigButton.isEnabled = true
                 exportConfigButton.isEnabled = true
                 importConfigButton.isEnabled = true
-                uploadConfigButton.isEnabled = true
                 keysCheckBox.isEnabled = true
                 hostsCheckBox.isEnabled = true
                 snippetsCheckBox.isEnabled = true
@@ -1127,11 +1232,7 @@ class SettingsOptionsPane : OptionsPane() {
                 tokenTextField.isEnabled = true
                 domainTextField.isEnabled = true
                 keywordHighlightsCheckBox.isEnabled = true
-                if (push) {
-                    uploadConfigButton.text = I18n.getString("termora.settings.sync.push")
-                } else {
-                    downloadConfigButton.text = I18n.getString("termora.settings.sync.pull")
-                }
+                syncConfigButton.text = I18n.getString("termora.settings.sync")
             }
 
             // 如果失败，提示错误
@@ -1151,10 +1252,8 @@ class SettingsOptionsPane : OptionsPane() {
                 withContext(Dispatchers.Swing) {
                     OptionPane.showMessageDialog(owner, message, messageType = JOptionPane.ERROR_MESSAGE)
                 }
-            } else {
-                // pulled
-                if (!pulled) pulled = !push
 
+            } else {
                 withContext(Dispatchers.Swing) {
                     val now = System.currentTimeMillis()
                     sync.lastSyncTime = now
@@ -1163,14 +1262,10 @@ class SettingsOptionsPane : OptionsPane() {
                     if (push && gistTextField.text.isBlank()) {
                         gistTextField.text = syncResult.map { it.config }.getOrDefault(syncConfig).gistId
                     }
-                    OptionPane.showMessageDialog(
-                        owner,
-                        message = I18n.getString("termora.settings.sync.done"),
-                        duration = 1500.milliseconds,
-                    )
                 }
             }
 
+            return syncResult.isSuccess
 
         }
 
@@ -1179,6 +1274,9 @@ class SettingsOptionsPane : OptionsPane() {
             typeComboBox.addItem(SyncType.GitLab)
             typeComboBox.addItem(SyncType.Gitee)
             typeComboBox.addItem(SyncType.WebDAV)
+
+            policyComboBox.addItem(SyncPolicy.Manual)
+            policyComboBox.addItem(SyncPolicy.OnChange)
 
             hostsCheckBox.isFocusable = false
             snippetsCheckBox.isFocusable = false
@@ -1193,6 +1291,12 @@ class SettingsOptionsPane : OptionsPane() {
             keywordHighlightsCheckBox.isSelected = sync.rangeKeywordHighlights
             macrosCheckBox.isSelected = sync.rangeMacros
             keymapCheckBox.isSelected = sync.rangeKeymap
+
+            if (sync.policy == SyncPolicy.Manual.name) {
+                policyComboBox.selectedItem = SyncPolicy.Manual
+            } else if (sync.policy == SyncPolicy.OnChange.name) {
+                policyComboBox.selectedItem = SyncPolicy.OnChange
+            }
 
             typeComboBox.selectedItem = sync.type
             gistTextField.text = sync.gist
@@ -1241,6 +1345,23 @@ class SettingsOptionsPane : OptionsPane() {
                 }
             }
 
+            policyComboBox.renderer = object : DefaultListCellRenderer() {
+                override fun getListCellRendererComponent(
+                    list: JList<*>?,
+                    value: Any?,
+                    index: Int,
+                    isSelected: Boolean,
+                    cellHasFocus: Boolean
+                ): Component {
+                    var text = value?.toString() ?: StringUtils.EMPTY
+                    if (value == SyncPolicy.Manual) {
+                        text = I18n.getString("termora.settings.sync.policy.manual")
+                    } else if (value == SyncPolicy.OnChange) {
+                        text = I18n.getString("termora.settings.sync.policy.on-change")
+                    }
+                    return super.getListCellRendererComponent(list, text, index, isSelected, cellHasFocus)
+                }
+            }
 
             val lastSyncTime = sync.lastSyncTime
             lastSyncTimeLabel.text = "${I18n.getString("termora.settings.sync.last-sync-time")}: ${
@@ -1250,6 +1371,7 @@ class SettingsOptionsPane : OptionsPane() {
             }"
 
             refreshButtons()
+
 
         }
 
@@ -1268,7 +1390,7 @@ class SettingsOptionsPane : OptionsPane() {
         private fun getCenterComponent(): JComponent {
             val layout = FormLayout(
                 "left:pref, $formMargin, default:grow, 30dlu",
-                "pref, $formMargin, pref, $formMargin, pref, $formMargin, pref, $formMargin, pref, $formMargin, pref"
+                "pref, $formMargin, pref, $formMargin, pref, $formMargin, pref, $formMargin, pref, $formMargin, pref, $formMargin, pref"
             )
 
             val rangeBox = FormBuilder.create()
@@ -1318,20 +1440,26 @@ class SettingsOptionsPane : OptionsPane() {
                 gistTextField.trailingComponent = visitGistBtn
             }
 
+            val syncPolicyBox = Box.createHorizontalBox()
+            syncPolicyBox.add(policyComboBox)
+            syncPolicyBox.add(Box.createHorizontalGlue())
+            syncPolicyBox.add(Box.createHorizontalGlue())
+
             builder.add("${tokenText}:").xy(1, rows)
                 .add(if (isWebDAV) gistTextField else tokenTextField).xy(3, rows).apply { rows += step }
                 .add("${gistText}:").xy(1, rows)
                 .add(if (isWebDAV) tokenTextField else gistTextField).xy(3, rows).apply { rows += step }
+                .add("${I18n.getString("termora.settings.sync.policy")}:").xy(1, rows)
+                .add(syncPolicyBox).xy(3, rows).apply { rows += step }
                 .add("${I18n.getString("termora.settings.sync.range")}:").xy(1, rows)
                 .add(rangeBox).xy(3, rows).apply { rows += step }
                 // Sync buttons
                 .add(
                     FormBuilder.create()
-                        .layout(FormLayout("pref, 2dlu, pref, 2dlu, pref, 2dlu, pref", "pref"))
-                        .add(uploadConfigButton).xy(1, 1)
-                        .add(downloadConfigButton).xy(3, 1)
-                        .add(exportConfigButton).xy(5, 1)
-                        .add(importConfigButton).xy(7, 1)
+                        .layout(FormLayout("pref, 2dlu, pref, 2dlu, pref", "pref"))
+                        .add(syncConfigButton).xy(1, 1)
+                        .add(exportConfigButton).xy(3, 1)
+                        .add(importConfigButton).xy(5, 1)
                         .build()
                 ).xy(3, rows, "center, fill").apply { rows += step }
                 .add(lastSyncTimeLabel).xy(3, rows, "center, fill").apply { rows += step }

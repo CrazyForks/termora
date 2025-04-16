@@ -6,12 +6,12 @@ import app.termora.keymap.Keymap
 import app.termora.keymgr.OhKeyPair
 import app.termora.macro.Macro
 import app.termora.snippet.Snippet
+import app.termora.sync.SyncManager
 import app.termora.sync.SyncType
 import app.termora.terminal.CursorStyle
 import jetbrains.exodus.bindings.StringBinding
 import jetbrains.exodus.env.*
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.launch
 import org.apache.commons.io.IOUtils
 import org.apache.commons.lang3.StringUtils
@@ -30,6 +30,7 @@ class Database private constructor(private val env: Environment) : Disposable {
         private const val KEYWORD_HIGHLIGHT_STORE = "KeywordHighlight"
         private const val MACRO_STORE = "Macro"
         private const val KEY_PAIR_STORE = "KeyPair"
+        private const val DELETED_DATA_STORE = "DeletedData"
         private val log = LoggerFactory.getLogger(Database::class.java)
 
 
@@ -142,6 +143,37 @@ class Database private constructor(private val env: Environment) : Disposable {
         }
     }
 
+    fun removeHost(id: String) {
+        env.executeInTransaction {
+            delete(it, HOST_STORE, id)
+            if (log.isDebugEnabled) {
+                log.debug("Removed host: $id")
+            }
+        }
+    }
+
+    fun addDeletedData(deletedData: DeletedData) {
+        val text = ohMyJson.encodeToString(deletedData)
+        env.executeInTransaction {
+            put(it, DELETED_DATA_STORE, deletedData.id, text)
+            if (log.isDebugEnabled) {
+                log.debug("Added DeletedData: ${deletedData.id} , $text")
+            }
+        }
+    }
+
+    fun getDeletedData(): Collection<DeletedData> {
+        return env.computeInTransaction { tx ->
+            openCursor<DeletedData?>(tx, DELETED_DATA_STORE) { _, value ->
+                try {
+                    ohMyJson.decodeFromString(value)
+                } catch (e: Exception) {
+                    null
+                }
+            }.values.filterNotNull()
+        }
+    }
+
     fun addSnippet(snippet: Snippet) {
         var text = ohMyJson.encodeToString(snippet)
         if (doorman.isWorking()) {
@@ -155,6 +187,14 @@ class Database private constructor(private val env: Environment) : Disposable {
         }
     }
 
+    fun removeSnippet(id: String) {
+        env.executeInTransaction {
+            delete(it, SNIPPET_STORE, id)
+            if (log.isDebugEnabled) {
+                log.debug("Removed snippet: $id")
+            }
+        }
+    }
 
     fun getSnippets(): Collection<Snippet> {
         val isWorking = doorman.isWorking()
@@ -249,6 +289,18 @@ class Database private constructor(private val env: Environment) : Disposable {
         val k = StringBinding.stringToEntry(key)
         val v = StringBinding.stringToEntry(value)
         store.put(tx, k, v)
+
+        // 数据变动时触发一次同步
+        if (name == HOST_STORE ||
+            name == KEYMAP_STORE ||
+            name == SNIPPET_STORE ||
+            name == KEYWORD_HIGHLIGHT_STORE ||
+            name == MACRO_STORE ||
+            name == KEY_PAIR_STORE ||
+            name == DELETED_DATA_STORE
+        ) {
+            SyncManager.getInstance().triggerOnChanged()
+        }
     }
 
     private fun delete(tx: Transaction, name: String, key: String) {
@@ -308,8 +360,7 @@ class Database private constructor(private val env: Environment) : Disposable {
         private val properties = Collections.synchronizedMap(mutableMapOf<String, String>())
 
         init {
-            @Suppress("OPT_IN_USAGE")
-            GlobalScope.launch(Dispatchers.IO) { properties.putAll(getProperties()) }
+            swingCoroutineScope.launch(Dispatchers.IO) { properties.putAll(getProperties()) }
         }
 
         protected open fun getString(key: String): String? {
@@ -378,6 +429,13 @@ class Database private constructor(private val env: Environment) : Disposable {
             PropertyDelegate<Int>(defaultValue) {
             override fun convertValue(value: String): Int {
                 return value.toIntOrNull() ?: initializer.invoke()
+            }
+        }
+
+        protected inner class DoublePropertyDelegate(defaultValue: Double) :
+            PropertyDelegate<Double>(defaultValue) {
+            override fun convertValue(value: String): Double {
+                return value.toDoubleOrNull() ?: initializer.invoke()
             }
         }
 
@@ -586,12 +644,22 @@ class Database private constructor(private val env: Environment) : Disposable {
         var backgroundRunning by BooleanPropertyDelegate(false)
 
         /**
+         * 背景图片的地址
+         */
+        var backgroundImage by StringPropertyDelegate(StringUtils.EMPTY)
+
+        /**
          * 语言
          */
         var language by StringPropertyLazyDelegate {
             I18n.containsLanguage(Locale.getDefault()) ?: Locale.US.toString()
         }
 
+
+        /**
+         * 透明度
+         */
+        var opacity by DoublePropertyDelegate(1.0)
     }
 
     /**
@@ -667,6 +735,11 @@ class Database private constructor(private val env: Environment) : Disposable {
          * 最后同步时间
          */
         var lastSyncTime by LongPropertyDelegate(0L)
+
+        /**
+         * 同步策略，为空就是默认手动
+         */
+        var policy by StringPropertyDelegate(StringUtils.EMPTY)
     }
 
     override fun dispose() {
