@@ -28,6 +28,8 @@ import java.io.*
 import java.util.*
 import java.util.function.Function
 import javax.swing.*
+import javax.swing.event.PopupMenuEvent
+import javax.swing.event.PopupMenuListener
 import javax.swing.filechooser.FileNameExtensionFilter
 import javax.swing.tree.TreePath
 import javax.swing.tree.TreeSelectionModel
@@ -35,6 +37,7 @@ import javax.xml.parsers.DocumentBuilderFactory
 import javax.xml.xpath.XPathConstants
 import javax.xml.xpath.XPathFactory
 
+@Suppress("CascadeIf")
 class NewHostTree : SimpleTree() {
 
     companion object {
@@ -50,7 +53,7 @@ class NewHostTree : SimpleTree() {
     private var isShowMoreInfo
         get() = properties.getString("HostTree.showMoreInfo", "false").toBoolean()
         set(value) = properties.putString("HostTree.showMoreInfo", value.toString())
-
+    private var isPopupMenu = false
     override val model = NewHostTreeModel()
 
     /**
@@ -95,7 +98,7 @@ class NewHostTree : SimpleTree() {
                 // 是否显示更多信息
                 if (isShowMoreInfo) {
                     val color = if (sel) {
-                        if (tree.hasFocus()) {
+                        if (tree.hasFocus() || isPopupMenu) {
                             UIManager.getColor("textHighlightText")
                         } else {
                             this.foreground
@@ -108,20 +111,20 @@ class NewHostTree : SimpleTree() {
                         """<font color=rgb(${color.red},${color.green},${color.blue})>${it}</font>"""
                     }
 
-                    if (host.protocol == Protocol.SSH) {
-                        text =
-                            "<html>${host.name}&nbsp;&nbsp;&nbsp;&nbsp;${fontTag.apply("${host.username}@${host.host}")}</html>"
+                    // @formatter:off
+                    if (host.protocol == Protocol.SSH || host.protocol == Protocol.RDP) {
+                        text = "<html>${host.name}&nbsp;&nbsp;&nbsp;&nbsp;${fontTag.apply("${host.username}@${host.host}")}</html>"
                     } else if (host.protocol == Protocol.Serial) {
-                        text =
-                            "<html>${host.name}&nbsp;&nbsp;&nbsp;&nbsp;${fontTag.apply(host.options.serialComm.port)}</html>"
+                        text = "<html>${host.name}&nbsp;&nbsp;&nbsp;&nbsp;${fontTag.apply(host.options.serialComm.port)}</html>"
                     } else if (host.protocol == Protocol.Folder) {
-                        text = "<html>${host.name}${fontTag.apply(" (${node.childCount})")}</html>"
+                        text = "<html>${host.name}${fontTag.apply(" (${node.getAllChildren().size})")}</html>"
                     }
+                    // @formatter:on
                 }
 
                 val c = super.getTreeCellRendererComponent(tree, text, sel, expanded, leaf, row, hasFocus)
 
-                icon = node.getIcon(sel, expanded, hasFocus)
+                icon = node.getIcon(sel, expanded, tree.hasFocus() || isPopupMenu)
                 return c
             }
         })
@@ -132,6 +135,7 @@ class NewHostTree : SimpleTree() {
         // double click
         addMouseListener(object : MouseAdapter() {
             override fun mouseClicked(e: MouseEvent) {
+                if (getPathForLocation(e.x, e.y) == null) return
                 if (doubleClickConnection && SwingUtilities.isLeftMouseButton(e) && e.clickCount % 2 == 0) {
                     val lastNode = lastSelectedPathComponent as? HostTreeNode ?: return
                     if (lastNode.host.protocol != Protocol.Folder) {
@@ -327,6 +331,21 @@ class NewHostTree : SimpleTree() {
         openWithSFTP.isEnabled = fullNodes.map { it.host }.any { it.protocol == Protocol.SSH }
         openWithSFTPCommand.isEnabled = openWithSFTP.isEnabled
         openWith.isEnabled = openWith.menuComponents.any { it is JMenuItem && it.isEnabled }
+
+        popupMenu.addPopupMenuListener(object : PopupMenuListener {
+            override fun popupMenuWillBecomeVisible(e: PopupMenuEvent) {
+                isPopupMenu = true
+            }
+
+            override fun popupMenuWillBecomeInvisible(e: PopupMenuEvent) {
+                isPopupMenu = false
+            }
+
+            override fun popupMenuCanceled(e: PopupMenuEvent?) {
+            }
+
+        })
+
         popupMenu.show(this, evt.x, evt.y)
     }
 

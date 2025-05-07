@@ -10,6 +10,7 @@ object Icons {
     val down by lazy { DynamicIcon("icons/down.svg", "icons/down_dark.svg") }
     val moveDown by lazy { DynamicIcon("icons/moveDown.svg", "icons/moveDown_dark.svg") }
     val close by lazy { DynamicIcon("icons/close.svg", "icons/close_dark.svg") }
+    val settingSync by lazy { DynamicIcon("icons/settingSync.svg", "icons/settingSync_dark.svg") }
     val openInNewWindow by lazy { DynamicIcon("icons/openInNewWindow.svg", "icons/openInNewWindow_dark.svg") }
     val openInToolWindow by lazy { DynamicIcon("icons/openInToolWindow.svg", "icons/openInToolWindow_dark.svg") }
     val searchHistory by lazy { DynamicIcon("icons/searchHistory.svg", "icons/searchHistory_dark.svg") }
@@ -63,6 +64,7 @@ object Icons {
     val revert by lazy { DynamicIcon("icons/revert.svg", "icons/revert_dark.svg") }
     val edit by lazy { DynamicIcon("icons/edit.svg", "icons/edit_dark.svg") }
     val microsoft by lazy { DynamicIcon("icons/microsoft.svg", "icons/microsoft_dark.svg") }
+    val microsoftWindows by lazy { DynamicIcon("icons/microsoftWindows.svg", "icons/microsoftWindows_dark.svg") }
     val tencent by lazy { DynamicIcon("icons/tencent.svg") }
     val google by lazy { DynamicIcon("icons/google-small.svg") }
     val aliyun by lazy { DynamicIcon("icons/aliyun.svg") }
@@ -93,6 +95,7 @@ object Icons {
     val sortedSet by lazy { DynamicIcon("icons/sortedSet.svg", "icons/sortedSet_dark.svg") }
     val colorPicker by lazy { DynamicIcon("icons/colorPicker.svg", "icons/colorPicker_dark.svg") }
     val folder by lazy { DynamicIcon("icons/folder.svg", "icons/folder_dark.svg") }
+    val file by lazy { DynamicIcon("icons/file.svg", "icons/file_dark.svg") }
     val listFiles by lazy { DynamicIcon("icons/listFiles.svg", "icons/listFiles_dark.svg") }
     val left by lazy { DynamicIcon("icons/left.svg", "icons/left_dark.svg") }
     val right by lazy { DynamicIcon("icons/right.svg", "icons/right_dark.svg") }

@@ -1,5 +1,8 @@
 package app.termora
 
+import org.apache.commons.lang3.StringUtils
+
+@Suppress("CascadeIf")
 class EditHostOptionsPane(private val host: Host) : HostOptionsPane() {
     init {
         generalOption.portTextField.value = host.port
@@ -13,6 +16,8 @@ class EditHostOptionsPane(private val host: Host) : HostOptionsPane() {
             generalOption.passwordTextField.text = host.authentication.password
         } else if (host.authentication.type == AuthenticationType.PublicKey) {
             generalOption.publicKeyComboBox.selectedItem = host.authentication.password
+        } else if (host.authentication.type == AuthenticationType.SSHAgent) {
+            generalOption.sshAgentComboBox.selectedItem = host.authentication.password
         }
 
         proxyOption.proxyTypeComboBox.selectedItem = host.proxy.type
@@ -28,6 +33,8 @@ class EditHostOptionsPane(private val host: Host) : HostOptionsPane() {
         terminalOption.heartbeatIntervalTextField.value = host.options.heartbeatInterval
 
         tunnelingOption.tunnelings.addAll(host.tunnelings)
+        tunnelingOption.x11ForwardingCheckBox.isSelected = host.options.enableX11Forwarding
+        tunnelingOption.x11ServerTextField.text = StringUtils.defaultIfBlank(host.options.x11Forwarding, "localhost:0")
 
         if (host.options.jumpHosts.isNotEmpty()) {
             val hosts = HostManager.getInstance().hosts().associateBy { it.id }

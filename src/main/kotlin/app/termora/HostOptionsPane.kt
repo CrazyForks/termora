@@ -6,14 +6,17 @@ import com.fazecast.jSerialComm.SerialPort
 import com.formdev.flatlaf.FlatClientProperties
 import com.formdev.flatlaf.extras.components.FlatComboBox
 import com.formdev.flatlaf.ui.FlatTextBorder
+import com.formdev.flatlaf.util.SystemInfo
 import com.jgoodies.forms.builder.FormBuilder
 import com.jgoodies.forms.layout.FormLayout
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.swing.Swing
 import kotlinx.coroutines.withContext
 import org.apache.commons.lang3.StringUtils
+import org.eclipse.jgit.internal.transport.sshd.agent.connector.PageantConnector
+import org.eclipse.jgit.internal.transport.sshd.agent.connector.UnixDomainSocketConnector
+import org.eclipse.jgit.internal.transport.sshd.agent.connector.WinPipeConnector
 import java.awt.*
 import java.awt.event.*
 import java.nio.charset.Charset
@@ -21,7 +24,7 @@ import javax.swing.*
 import javax.swing.table.DefaultTableCellRenderer
 import javax.swing.table.DefaultTableModel
 
-
+@Suppress("CascadeIf")
 open class HostOptionsPane : OptionsPane() {
     protected val tunnelingOption = TunnelingOption()
     protected val generalOption = GeneralOption()
@@ -52,17 +55,22 @@ open class HostOptionsPane : OptionsPane() {
         val port = (generalOption.portTextField.value ?: 22) as Int
         var authentication = Authentication.No
         var proxy = Proxy.No
+        val authenticationType = generalOption.authenticationTypeComboBox.selectedItem as AuthenticationType
 
-
-        if (generalOption.authenticationTypeComboBox.selectedItem == AuthenticationType.Password) {
+        if (authenticationType == AuthenticationType.Password) {
             authentication = authentication.copy(
-                type = AuthenticationType.Password,
+                type = authenticationType,
                 password = String(generalOption.passwordTextField.password)
             )
-        } else if (generalOption.authenticationTypeComboBox.selectedItem == AuthenticationType.PublicKey) {
+        } else if (authenticationType == AuthenticationType.PublicKey) {
             authentication = authentication.copy(
-                type = AuthenticationType.PublicKey,
+                type = authenticationType,
                 password = generalOption.publicKeyComboBox.selectedItem?.toString() ?: StringUtils.EMPTY
+            )
+        } else if (authenticationType == AuthenticationType.SSHAgent) {
+            authentication = authentication.copy(
+                type = authenticationType,
+                password = generalOption.sshAgentComboBox.selectedItem?.toString() ?: StringUtils.EMPTY
             )
         }
 
@@ -94,7 +102,9 @@ open class HostOptionsPane : OptionsPane() {
             heartbeatInterval = (terminalOption.heartbeatIntervalTextField.value ?: 30) as Int,
             jumpHosts = jumpHostsOption.jumpHosts.map { it.id },
             serialComm = serialComm,
-            sftpDefaultDirectory = sftpOption.defaultDirectoryField.text
+            sftpDefaultDirectory = sftpOption.defaultDirectoryField.text,
+            enableX11Forwarding = tunnelingOption.x11ForwardingCheckBox.isSelected,
+            x11Forwarding = tunnelingOption.x11ServerTextField.text,
         )
 
         return Host(
@@ -160,6 +170,17 @@ open class HostOptionsPane : OptionsPane() {
             }
         }
 
+        // tunnel
+        if (tunnelingOption.x11ForwardingCheckBox.isSelected) {
+            if (validateField(tunnelingOption.x11ServerTextField)) {
+                return false
+            }
+            val segments = tunnelingOption.x11ServerTextField.text.split(":")
+            if (segments.size != 2 || segments[1].toIntOrNull() == null) {
+                setOutlineError(tunnelingOption.x11ServerTextField)
+                return false
+            }
+        }
 
         return true
     }
@@ -169,12 +190,16 @@ open class HostOptionsPane : OptionsPane() {
      */
     private fun validateField(textField: JTextField): Boolean {
         if (textField.isEnabled && textField.text.isBlank()) {
-            selectOptionJComponent(textField)
-            textField.putClientProperty(FlatClientProperties.OUTLINE, FlatClientProperties.OUTLINE_ERROR)
-            textField.requestFocusInWindow()
+            setOutlineError(textField)
             return true
         }
         return false
+    }
+
+    private fun setOutlineError(textField: JTextField) {
+        selectOptionJComponent(textField)
+        textField.putClientProperty(FlatClientProperties.OUTLINE, FlatClientProperties.OUTLINE_ERROR)
+        textField.requestFocusInWindow()
     }
 
     /**
@@ -200,6 +225,7 @@ open class HostOptionsPane : OptionsPane() {
         private val passwordPanel = JPanel(BorderLayout())
         private val chooseKeyBtn = JButton(Icons.greyKey)
         val passwordTextField = OutlinePasswordField(255)
+        val sshAgentComboBox = OutlineComboBox<String>()
         val publicKeyComboBox = OutlineComboBox<String>()
         val remarkTextArea = FixedLengthTextArea(512)
         val authenticationTypeComboBox = FlatComboBox<AuthenticationType>()
@@ -214,6 +240,10 @@ open class HostOptionsPane : OptionsPane() {
 
             publicKeyComboBox.isEditable = false
             chooseKeyBtn.isFocusable = false
+
+            // 只有 Windows 允许修改
+            sshAgentComboBox.isEditable = SystemInfo.isWindows
+            sshAgentComboBox.isEnabled = SystemInfo.isWindows
 
             protocolTypeComboBox.renderer = object : DefaultListCellRenderer() {
                 override fun getListCellRendererComponent(
@@ -290,10 +320,22 @@ open class HostOptionsPane : OptionsPane() {
             protocolTypeComboBox.addItem(Protocol.SSH)
             protocolTypeComboBox.addItem(Protocol.Local)
             protocolTypeComboBox.addItem(Protocol.Serial)
+            protocolTypeComboBox.addItem(Protocol.RDP)
 
             authenticationTypeComboBox.addItem(AuthenticationType.No)
             authenticationTypeComboBox.addItem(AuthenticationType.Password)
             authenticationTypeComboBox.addItem(AuthenticationType.PublicKey)
+            authenticationTypeComboBox.addItem(AuthenticationType.SSHAgent)
+
+            if (SystemInfo.isWindows) {
+                // 不要修改 addItem 的顺序，因为第一个是默认的
+                sshAgentComboBox.addItem(PageantConnector.DESCRIPTOR.identityAgent)
+                sshAgentComboBox.addItem(WinPipeConnector.DESCRIPTOR.identityAgent)
+                sshAgentComboBox.placeholderText = PageantConnector.DESCRIPTOR.identityAgent
+            } else {
+                sshAgentComboBox.addItem(UnixDomainSocketConnector.DESCRIPTOR.identityAgent)
+                sshAgentComboBox.placeholderText = UnixDomainSocketConnector.DESCRIPTOR.identityAgent
+            }
 
             authenticationTypeComboBox.selectedItem = AuthenticationType.Password
 
@@ -457,6 +499,8 @@ open class HostOptionsPane : OptionsPane() {
                         .add(chooseKeyBtn).xy(3, 1)
                         .build(), BorderLayout.CENTER
                 )
+            } else if (authenticationTypeComboBox.selectedItem == AuthenticationType.SSHAgent) {
+                passwordPanel.add(sshAgentComboBox, BorderLayout.CENTER)
             } else {
                 passwordPanel.add(passwordTextField, BorderLayout.CENTER)
             }
@@ -722,6 +766,8 @@ open class HostOptionsPane : OptionsPane() {
 
     protected inner class TunnelingOption : JPanel(BorderLayout()), Option {
         val tunnelings = mutableListOf<Tunneling>()
+        val x11ForwardingCheckBox = JCheckBox("X DISPLAY:")
+        val x11ServerTextField = OutlineTextField(255)
 
         private val model = object : DefaultTableModel() {
             override fun getRowCount(): Int {
@@ -796,13 +842,36 @@ open class HostOptionsPane : OptionsPane() {
             box.add(Box.createHorizontalStrut(4))
             box.add(deleteBtn)
 
-            add(JLabel("TCP/IP Forwarding:"), BorderLayout.NORTH)
-            add(scrollPane, BorderLayout.CENTER)
-            add(box, BorderLayout.SOUTH)
+            x11ForwardingCheckBox.isFocusable = false
+
+            if (x11ServerTextField.text.isBlank()) {
+                x11ServerTextField.text = "localhost:0"
+            }
+
+            val x11Forwarding = Box.createHorizontalBox()
+            x11Forwarding.border = BorderFactory.createCompoundBorder(
+                BorderFactory.createTitledBorder("X11 Forwarding"),
+                BorderFactory.createEmptyBorder(4, 4, 4, 4)
+            )
+            x11Forwarding.add(x11ForwardingCheckBox)
+            x11Forwarding.add(x11ServerTextField)
+
+            x11ServerTextField.isEnabled = x11ForwardingCheckBox.isSelected
+
+            val panel = JPanel(BorderLayout())
+            panel.add(JLabel("TCP/IP Forwarding:"), BorderLayout.NORTH)
+            panel.add(scrollPane, BorderLayout.CENTER)
+            panel.add(box, BorderLayout.SOUTH)
+            panel.border = BorderFactory.createEmptyBorder(0, 0, 8, 0)
+
+            add(panel, BorderLayout.CENTER)
+            add(x11Forwarding, BorderLayout.SOUTH)
 
         }
 
         private fun initEvents() {
+            x11ForwardingCheckBox.addChangeListener { x11ServerTextField.isEnabled = x11ForwardingCheckBox.isSelected }
+
             addBtn.addActionListener(object : AbstractAction() {
                 override fun actionPerformed(e: ActionEvent?) {
                     val dialog = PortForwardingDialog(SwingUtilities.getWindowAncestor(this@HostOptionsPane))
@@ -1054,8 +1123,7 @@ open class HostOptionsPane : OptionsPane() {
             addComponentListener(object : ComponentAdapter() {
                 override fun componentShown(e: ComponentEvent) {
                     removeComponentListener(this)
-                    @Suppress("OPT_IN_USAGE")
-                    GlobalScope.launch(Dispatchers.IO) {
+                    swingCoroutineScope.launch(Dispatchers.IO) {
                         for (commPort in SerialPort.getCommPorts()) {
                             withContext(Dispatchers.Swing) {
                                 serialPortComboBox.addItem(commPort.systemPortName)

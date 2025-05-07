@@ -1,32 +1,33 @@
 [versions]
-kotlin = "2.1.10"
+kotlin = "2.1.20"
 slf4j = "2.0.17"
-pty4j = "0.13.2"
+pty4j = "0.13.4"
 tinylog = "2.7.0"
-kotlinx-coroutines = "1.10.1"
-flatlaf = "3.5.4"
-kotlinx-serialization-json = "1.8.0"
+kotlinx-coroutines = "1.10.2"
+flatlaf = "3.6"
+kotlinx-serialization-json = "1.8.1"
 commons-codec = "1.18.0"
 commons-lang3 = "3.17.0"
 commons-csv = "1.14.0"
 commons-net = "3.11.1"
-commons-text = "1.13.0"
+commons-text = "1.13.1"
 commons-compress = "1.27.1"
+commons-vfs2="2.10.0"
 swingx = "1.6.5-1"
 jgoodies-forms = "1.9.0"
 jfa = "1.2.0"
-oshi = "6.6.5"
+oshi = "6.8.1"
 versioncompare = "1.4.1"
 jna = "5.17.0"
 jSystemThemeDetector = "3.9.1"
-commons-io = "2.18.0"
+commons-io = "2.19.0"
 jbr-api = "17.1.10.1"
-hutool = "5.8.34"
-jsch = "0.2.21"
+hutool = "5.8.37"
+jsch = "0.2.26"
 okhttp = "4.12.0"
 sshj = "0.39.0"
-sshd-core = "2.14.0"
-jgit = "7.1.0.202411261347-r"
+sshd-core = "2.15.0"
+jgit = "7.2.0.202503040940-r"
 commonmark = "0.24.0"
 jnafilechooser = "1.1.2"
 xodus = "2.0.1"
@@ -34,11 +35,12 @@ bip39 = "1.0.9"
 colorpicker = "2.0.1"
 rhino = "1.8.0"
 delight-rhino-sandbox = "0.0.17"
-testcontainers = "1.20.6"
+testcontainers = "1.21.0"
 mixpanel = "1.5.3"
 jSerialComm = "2.11.0"
 ini4j = "0.5.5-2"
 restart4j = "0.0.1"
+eddsa = "0.3.0"
 
 [libraries]
 kotlinx-coroutines-swing = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-swing", version.ref = "kotlinx-coroutines" }
@@ -53,6 +55,7 @@ commons-lang3 = { group = "org.apache.commons", name = "commons-lang3", version.
 commons-csv = { group = "org.apache.commons", name = "commons-csv", version.ref = "commons-csv" }
 commons-text = { group = "org.apache.commons", name = "commons-text", version.ref = "commons-text" }
 commons-compress = { group = "org.apache.commons", name = "commons-compress", version.ref = "commons-compress" }
+commons-vfs2 = { group = "org.apache.commons", name = "commons-vfs2", version.ref = "commons-vfs2" }
 pty4j = { group = "org.jetbrains.pty4j", name = "pty4j", version.ref = "pty4j" }
 ini4j = { module = "org.jetbrains.intellij.deps:ini4j", version.ref = "ini4j" }
 flatlaf = { group = "com.formdev", name = "flatlaf", version.ref = "flatlaf" }
@@ -80,6 +83,7 @@ sshd-core = { module = "org.apache.sshd:sshd-core", version.ref = "sshd-core" }
 jgit = { module = "org.eclipse.jgit:org.eclipse.jgit", version.ref = "jgit" }
 commonmark = { module = "org.commonmark:commonmark", version.ref = "commonmark" }
 jgit-sshd = { module = "org.eclipse.jgit:org.eclipse.jgit.ssh.apache", version.ref = "jgit" }
+jgit-agent = { module = "org.eclipse.jgit:org.eclipse.jgit.ssh.apache.agent", version.ref = "jgit" }
 xodus-openAPI = { module = "org.jetbrains.xodus:xodus-openAPI", version.ref = "xodus" }
 xodus-environment = { module = "org.jetbrains.xodus:xodus-environment", version.ref = "xodus" }
 xodus-vfs = { module = "org.jetbrains.xodus:xodus-vfs", version.ref = "xodus" }
@@ -90,6 +94,7 @@ delight-rhino-sandbox = { module = "org.javadelight:delight-rhino-sandbox", vers
 colorpicker = { module = "org.drjekyll:colorpicker", version.ref = "colorpicker" }
 mixpanel = { module = "com.mixpanel:mixpanel-java", version.ref = "mixpanel" }
 jSerialComm = { module = "com.fazecast:jSerialComm", version.ref = "jSerialComm" }
+eddsa = { module = "net.i2p.crypto:eddsa", version.ref = "eddsa" }
 
 [plugins]
 kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }

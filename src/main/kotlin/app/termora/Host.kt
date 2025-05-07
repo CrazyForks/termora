@@ -25,6 +25,7 @@ enum class Protocol {
     SSH,
     Local,
     Serial,
+    RDP,
 
     /**
      * 交互式的 SFTP，此协议只在系统内部交互不应该暴露给用户也不应该持久化
@@ -38,6 +39,7 @@ enum class AuthenticationType {
     No,
     Password,
     PublicKey,
+    SSHAgent,
     KeyboardInteractive,
 }
 
@@ -137,6 +139,16 @@ data class Options(
      * SFTP 默认目录
      */
     val sftpDefaultDirectory: String = StringUtils.EMPTY,
+
+    /**
+     * X11 Forwarding
+     */
+    val enableX11Forwarding: Boolean = false,
+
+    /**
+     * X11 Server,Format: host.port. default: localhost:0
+     */
+    val x11Forwarding: String = StringUtils.EMPTY,
 ) {
     companion object {
         val Default = Options()
@@ -212,6 +224,27 @@ data class EncryptedHost(
     var creatorId: String = StringUtils.EMPTY,
     var createDate: Long = 0L,
     var updateDate: Long = 0L,
+)
+
+/**
+ * 被删除的数据
+ */
+@Serializable
+data class DeletedData(
+    /**
+     * 被删除的 ID
+     */
+    val id: String = StringUtils.EMPTY,
+
+    /**
+     * 数据类型：Host、Keymap、KeyPair、KeywordHighlight、Macro、Snippet
+     */
+    val type: String = StringUtils.EMPTY,
+
+    /**
+     * 被删除的时间
+     */
+    val deleteDate: Long,
 )
 
 

@@ -51,7 +51,7 @@ class OutlineTextArea : FlatTextArea() {
     }
 }
 
-class OutlineComboBox<T> : JComboBox<T>() {
+class OutlineComboBox<T> : FlatComboBox<T>() {
     init {
         addItemListener {
             if (it.stateChange == ItemEvent.SELECTED) {
@@ -146,7 +146,7 @@ open class EmailFormattedTextField(var maxLength: Int = Int.MAX_VALUE) : Outline
 }
 
 
-abstract class NumberSpinner(
+open class NumberSpinner(
     value: Int,
     minimum: Int,
     maximum: Int,

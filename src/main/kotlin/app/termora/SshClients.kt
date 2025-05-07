@@ -3,13 +3,17 @@ package app.termora
 import app.termora.keyboardinteractive.TerminalUserInteraction
 import app.termora.keymgr.OhKeyPairKeyPairProvider
 import app.termora.terminal.TerminalSize
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.swing.Swing
-import kotlinx.coroutines.withContext
+import app.termora.x11.X11ChannelFactory
+import com.formdev.flatlaf.FlatLaf
+import com.formdev.flatlaf.util.FontUtils
+import com.formdev.flatlaf.util.SystemInfo
+import com.jgoodies.forms.builder.FormBuilder
+import com.jgoodies.forms.layout.FormLayout
 import org.apache.commons.io.IOUtils
 import org.apache.commons.lang3.StringUtils
 import org.apache.sshd.client.ClientBuilder
 import org.apache.sshd.client.SshClient
+import org.apache.sshd.client.auth.password.UserAuthPasswordFactory
 import org.apache.sshd.client.channel.ChannelShell
 import org.apache.sshd.client.channel.ClientChannelEvent
 import org.apache.sshd.client.config.hosts.HostConfigEntry
@@ -19,44 +23,72 @@ import org.apache.sshd.client.kex.DHGClient
 import org.apache.sshd.client.keyverifier.KnownHostsServerKeyVerifier
 import org.apache.sshd.client.keyverifier.ModifiedServerKeyAcceptor
 import org.apache.sshd.client.keyverifier.ServerKeyVerifier
+import org.apache.sshd.client.session.ClientProxyConnector
 import org.apache.sshd.client.session.ClientSession
+import org.apache.sshd.client.session.ClientSessionImpl
+import org.apache.sshd.client.session.SessionFactory
 import org.apache.sshd.common.AttributeRepository
+import org.apache.sshd.common.SshConstants
 import org.apache.sshd.common.SshException
+import org.apache.sshd.common.channel.ChannelFactory
 import org.apache.sshd.common.channel.PtyChannelConfiguration
+import org.apache.sshd.common.channel.PtyChannelConfigurationHolder
+import org.apache.sshd.common.cipher.CipherNone
+import org.apache.sshd.common.compression.BuiltinCompressions
+import org.apache.sshd.common.config.keys.KeyRandomArt
 import org.apache.sshd.common.config.keys.KeyUtils
+import org.apache.sshd.common.future.CloseFuture
+import org.apache.sshd.common.future.SshFutureListener
 import org.apache.sshd.common.global.KeepAliveHandler
+import org.apache.sshd.common.io.IoConnectFuture
+import org.apache.sshd.common.io.IoConnector
+import org.apache.sshd.common.io.IoServiceEventListener
+import org.apache.sshd.common.io.IoSession
 import org.apache.sshd.common.kex.BuiltinDHFactories
 import org.apache.sshd.common.keyprovider.KeyIdentityProvider
+import org.apache.sshd.common.session.Session
+import org.apache.sshd.common.session.SessionListener
+import org.apache.sshd.common.signature.BuiltinSignatures
 import org.apache.sshd.common.util.net.SshdSocketAddress
 import org.apache.sshd.core.CoreModuleProperties
 import org.apache.sshd.server.forward.AcceptAllForwardingFilter
 import org.apache.sshd.server.forward.RejectAllForwardingFilter
 import org.eclipse.jgit.internal.transport.sshd.JGitClientSession
 import org.eclipse.jgit.internal.transport.sshd.JGitSshClient
+import org.eclipse.jgit.internal.transport.sshd.agent.JGitSshAgentFactory
+import org.eclipse.jgit.internal.transport.sshd.agent.connector.PageantConnector
+import org.eclipse.jgit.internal.transport.sshd.agent.connector.UnixDomainSocketConnector
+import org.eclipse.jgit.internal.transport.sshd.proxy.AbstractClientProxyConnector
+import org.eclipse.jgit.internal.transport.sshd.proxy.HttpClientConnector
+import org.eclipse.jgit.internal.transport.sshd.proxy.Socks5ClientConnector
 import org.eclipse.jgit.transport.CredentialsProvider
+import org.eclipse.jgit.transport.SshConstants.IDENTITY_AGENT
 import org.eclipse.jgit.transport.sshd.IdentityPasswordProvider
-import org.eclipse.jgit.transport.sshd.ProxyData
+import org.eclipse.jgit.transport.sshd.agent.ConnectorFactory
 import org.slf4j.LoggerFactory
+import java.awt.Font
 import java.awt.Window
 import java.io.ByteArrayOutputStream
 import java.net.InetSocketAddress
-import java.net.Proxy
 import java.net.SocketAddress
 import java.nio.file.Path
 import java.nio.file.Paths
 import java.security.PublicKey
 import java.time.Duration
 import java.util.*
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
-import javax.swing.JOptionPane
-import javax.swing.SwingUtilities
+import java.util.concurrent.atomic.AtomicReference
+import javax.swing.*
 import kotlin.math.max
 
+@Suppress("CascadeIf")
 object SshClients {
 
     val HOST_KEY = AttributeRepository.AttributeKey<Host>()
 
     private val timeout = Duration.ofSeconds(30)
+    private val hostManager get() = HostManager.getInstance()
     private val log by lazy { LoggerFactory.getLogger(SshClients::class.java) }
 
     /**
@@ -79,6 +111,12 @@ object SshClients {
         env.putAll(host.options.envs())
 
         val channel = session.createShellChannel(configuration, env)
+        if (host.options.enableX11Forwarding) {
+            if (channel is app.termora.x11.ChannelShell) {
+                channel.xForwarding = true
+            }
+        }
+
         if (!channel.open().verify(timeout).await()) {
             throw SshException("Failed to open Shell")
         }
@@ -119,16 +157,16 @@ object SshClients {
      * 打开一个会话
      */
     fun openSession(host: Host, client: SshClient): ClientSession {
-
+        val h = hostManager.getHost(host.id) ?: host
 
         // 如果没有跳板机直接连接
-        if (host.options.jumpHosts.isEmpty()) {
-            return doOpenSession(host, client)
+        if (h.options.jumpHosts.isEmpty()) {
+            return doOpenSession(h, client)
         }
 
         val jumpHosts = mutableListOf<Host>()
         val hosts = HostManager.getInstance().hosts().associateBy { it.id }
-        for (jumpHostId in host.options.jumpHosts) {
+        for (jumpHostId in h.options.jumpHosts) {
             val e = hosts[jumpHostId]
             if (e == null) {
                 if (log.isWarnEnabled) {
@@ -140,7 +178,7 @@ object SshClients {
         }
 
         // 最后一跳是目标机器
-        jumpHosts.add(host)
+        jumpHosts.add(h)
 
         val sessions = mutableListOf<ClientSession>()
         for (i in 0 until jumpHosts.size) {
@@ -186,18 +224,50 @@ object SshClients {
         entry.username = host.username
         entry.hostName = host.host
         entry.setProperty("Middleware", middleware.toString())
+        entry.setProperty("Host", host.id)
 
-        val session = client.connect(entry)
-            .verify(timeout).session
+        // 设置代理
+//        configureProxy(entry, host, client)
+
+        // ssh-agent
+        if (host.authentication.type == AuthenticationType.SSHAgent) {
+            if (host.authentication.password.isNotBlank())
+                entry.setProperty(IDENTITY_AGENT, host.authentication.password)
+            else if (SystemInfo.isWindows)
+                entry.setProperty(IDENTITY_AGENT, PageantConnector.DESCRIPTOR.identityAgent)
+            else
+                entry.setProperty(IDENTITY_AGENT, UnixDomainSocketConnector.DESCRIPTOR.identityAgent)
+        }
+
+        val session = client.connect(entry).verify(timeout).session
         if (host.authentication.type == AuthenticationType.Password) {
             session.addPasswordIdentity(host.authentication.password)
         } else if (host.authentication.type == AuthenticationType.PublicKey) {
             session.keyIdentityProvider = OhKeyPairKeyPairProvider(host.authentication.password)
         }
 
-        val verifyTimeout = Duration.ofSeconds(timeout.seconds * 5)
-        if (!session.auth().verify(verifyTimeout).await(verifyTimeout)) {
-            throw SshException("Authentication failed")
+        if (host.options.enableX11Forwarding) {
+            val segments = host.options.x11Forwarding.split(":")
+            if (segments.size == 2) {
+                val x11Host = segments[0]
+                val x11Port = segments[1].toIntOrNull()
+                if (x11Port != null) {
+                    CoreModuleProperties.X11_BIND_HOST.set(session, x11Host)
+                    CoreModuleProperties.X11_BASE_PORT.set(session, 6000 + x11Port)
+                }
+            }
+        }
+
+        try {
+            if (!session.auth().verify(timeout).await(timeout)) {
+                throw SshException("Authentication failed")
+            }
+        } catch (e: Exception) {
+            if (e !is SshException || e.disconnectCode != SshConstants.SSH2_DISCONNECT_NO_MORE_AUTH_METHODS_AVAILABLE) throw e
+            val owner = client.properties["owner"] as Window? ?: throw e
+            val authentication = ask(host, owner) ?: throw e
+            if (authentication.type == AuthenticationType.No) throw e
+            return doOpenSession(host.copy(authentication = authentication), client)
         }
 
         session.setAttribute(HOST_KEY, host)
@@ -241,27 +311,13 @@ object SshClients {
         return sshdSocketAddress
     }
 
-    suspend fun openClient(host: Host, owner: Window): Pair<SshClient, Host> {
-        val client = openClient(host)
-        var myHost = host
-        withContext(Dispatchers.Swing) {
-            client.userInteraction = TerminalUserInteraction(owner)
-            client.serverKeyVerifier = DialogServerKeyVerifier(owner)
-            // 弹出授权框
-            if (host.authentication.type == AuthenticationType.No) {
-                val dialog = RequestAuthenticationDialog(owner, host)
-                val authentication = dialog.getAuthentication()
-                myHost = myHost.copy(
-                    authentication = authentication,
-                    username = dialog.getUsername(), updateDate = System.currentTimeMillis(),
-                )
-                // save
-                if (dialog.isRemembered()) {
-                    HostManager.getInstance().addHost(myHost)
-                }
-            }
-        }
-        return client to myHost
+    fun openClient(host: Host, owner: Window): SshClient {
+        val h = hostManager.getHost(host.id) ?: host
+        val client = openClient(h)
+        client.userInteraction = TerminalUserInteraction(owner)
+        client.serverKeyVerifier = DialogServerKeyVerifier(owner)
+        client.properties["owner"] = owner
+        return client
     }
 
     /**
@@ -270,11 +326,12 @@ object SshClients {
     fun openClient(host: Host): SshClient {
         val builder = ClientBuilder.builder()
         builder.globalRequestHandlers(listOf(KeepAliveHandler.INSTANCE))
-            .factory { JGitSshClient() }
+            .factory { MyJGitSshClient() }
 
         val keyExchangeFactories = ClientBuilder.setUpDefaultKeyExchanges(true).toMutableList()
 
         // https://github.com/TermoraDev/termora/issues/123
+        @Suppress("DEPRECATION")
         keyExchangeFactories.addAll(
             listOf(
                 DHGClient.newFactory(BuiltinDHFactories.dhg1),
@@ -284,6 +341,24 @@ object SshClients {
         )
         builder.keyExchangeFactories(keyExchangeFactories)
 
+        val compressionFactories = ClientBuilder.setUpDefaultCompressionFactories(true).toMutableList()
+        for (compression in listOf(
+            BuiltinCompressions.none,
+            BuiltinCompressions.zlib,
+            BuiltinCompressions.delayedZlib
+        )) {
+            if (compressionFactories.contains(compression)) continue
+            compressionFactories.add(compression)
+        }
+        builder.compressionFactories(compressionFactories)
+
+        val signatureFactories = ClientBuilder.setUpDefaultSignatureFactories(true).toMutableList()
+        for (signature in BuiltinSignatures.entries) {
+            if (signatureFactories.contains(signature)) continue
+            signatureFactories.add(signature)
+        }
+        builder.signatureFactories(signatureFactories)
+
         if (host.tunnelings.isEmpty() && host.options.jumpHosts.isEmpty()) {
             builder.forwardingFilter(RejectAllForwardingFilter.INSTANCE)
         } else {
@@ -292,11 +367,42 @@ object SshClients {
 
         builder.hostConfigEntryResolver(HostConfigEntryResolver.EMPTY)
 
+        val channelFactories = mutableListOf<ChannelFactory>()
+        channelFactories.addAll(ClientBuilder.DEFAULT_CHANNEL_FACTORIES)
+        channelFactories.add(X11ChannelFactory.INSTANCE)
+        builder.channelFactories(channelFactories)
+
         val sshClient = builder.build() as JGitSshClient
 
         // https://github.com/TermoraDev/termora/issues/180
         // JGit 会尝试读取本地的私钥或缓存的私钥
         sshClient.keyIdentityProvider = KeyIdentityProvider { mutableListOf() }
+
+        // 设置优先级
+        if (host.authentication.type == AuthenticationType.PublicKey || host.authentication.type == AuthenticationType.SSHAgent) {
+            if (host.authentication.type == AuthenticationType.SSHAgent) {
+                // ssh-agent
+                sshClient.agentFactory = JGitSshAgentFactory(ConnectorFactory.getDefault(), null)
+            }
+            CoreModuleProperties.PREFERRED_AUTHS.set(
+                sshClient,
+                listOf(
+                    UserAuthPasswordFactory.PUBLIC_KEY,
+                    UserAuthPasswordFactory.PASSWORD,
+                    UserAuthPasswordFactory.KB_INTERACTIVE
+                ).joinToString(",")
+            )
+        } else {
+            CoreModuleProperties.PREFERRED_AUTHS.set(
+                sshClient,
+                listOf(
+                    UserAuthPasswordFactory.PASSWORD,
+                    UserAuthPasswordFactory.PUBLIC_KEY,
+                    UserAuthPasswordFactory.KB_INTERACTIVE
+                ).joinToString(",")
+            )
+        }
+
 
         val heartbeatInterval = max(host.options.heartbeatInterval, 3)
         CoreModuleProperties.HEARTBEAT_INTERVAL.set(sshClient, Duration.ofSeconds(heartbeatInterval.toLong()))
@@ -304,94 +410,295 @@ object SshClients {
 
         sshClient.setKeyPasswordProviderFactory { IdentityPasswordProvider(CredentialsProvider.getDefault()) }
 
-        if (host.proxy.type != ProxyType.No) {
-            sshClient.setProxyDatabase {
-                if (host.proxy.authenticationType == AuthenticationType.No) ProxyData(
-                    Proxy(
-                        if (host.proxy.type == ProxyType.SOCKS5) Proxy.Type.SOCKS else Proxy.Type.HTTP,
-                        InetSocketAddress(host.proxy.host, host.proxy.port)
-                    )
-                )
-                else
-                    ProxyData(
-                        Proxy(
-                            if (host.proxy.type == ProxyType.SOCKS5) Proxy.Type.SOCKS else Proxy.Type.HTTP,
-                            InetSocketAddress(host.proxy.host, host.proxy.port)
-                        ),
-                        host.proxy.username,
-                        host.proxy.password.toCharArray(),
-                    )
-            }
-        }
-
         sshClient.start()
         return sshClient
     }
-}
 
-
-private class MyDialogServerKeyVerifier(private val owner: Window) : ServerKeyVerifier, ModifiedServerKeyAcceptor {
-    override fun verifyServerKey(
-        clientSession: ClientSession,
-        remoteAddress: SocketAddress,
-        serverKey: PublicKey
-    ): Boolean {
-        return true
-    }
-
-    override fun acceptModifiedServerKey(
-        clientSession: ClientSession?,
-        remoteAddress: SocketAddress?,
-        entry: KnownHostEntry?,
-        expected: PublicKey?,
-        actual: PublicKey?
-    ): Boolean {
-        val result = AtomicBoolean(false)
-
+    private fun ask(host: Host, owner: Window): Authentication? {
+        val ref = AtomicReference<Authentication>(null)
         SwingUtilities.invokeAndWait {
-            result.set(
-                OptionPane.showConfirmDialog(
-                    parentComponent = owner,
-                    message = I18n.getString(
-                        "termora.host.modified-server-key",
-                        remoteAddress.toString().replace("/", StringUtils.EMPTY),
-                        KeyUtils.getKeyType(expected),
-                        KeyUtils.getFingerPrint(expected),
-                        KeyUtils.getKeyType(actual),
-                        KeyUtils.getFingerPrint(actual),
-                    ),
-                    optionType = JOptionPane.OK_CANCEL_OPTION,
-                    messageType = JOptionPane.WARNING_MESSAGE,
-                ) == JOptionPane.OK_OPTION
-            )
-        }
-
-        return result.get()
-    }
-}
-
-class DialogServerKeyVerifier(
-    owner: Window,
-) : KnownHostsServerKeyVerifier(
-    MyDialogServerKeyVerifier(owner),
-    Paths.get(Application.getBaseDataDir().absolutePath, "known_hosts")
-) {
-    init {
-        modifiedServerKeyAcceptor = delegateVerifier as ModifiedServerKeyAcceptor
-    }
-
-    override fun updateKnownHostsFile(
-        clientSession: ClientSession?,
-        remoteAddress: SocketAddress?,
-        serverKey: PublicKey?,
-        file: Path?,
-        knownHosts: Collection<HostEntryPair?>?
-    ): KnownHostEntry? {
-        if (clientSession is JGitClientSession) {
-            if (SshClients.isMiddleware(clientSession)) {
-                return null
+            val dialog = RequestAuthenticationDialog(owner, host)
+            dialog.setLocationRelativeTo(owner)
+            val authentication = dialog.getAuthentication().apply { ref.set(this) }
+            // save
+            if (dialog.isRemembered()) {
+                hostManager.addHost(
+                    host.copy(
+                        authentication = authentication,
+                        username = dialog.getUsername(), updateDate = System.currentTimeMillis(),
+                    )
+                )
             }
         }
-        return super.updateKnownHostsFile(clientSession, remoteAddress, serverKey, file, knownHosts)
+        return ref.get()
     }
+
+    private class MyDialogServerKeyVerifier(private val owner: Window) : ServerKeyVerifier, ModifiedServerKeyAcceptor {
+        override fun verifyServerKey(
+            clientSession: ClientSession,
+            remoteAddress: SocketAddress,
+            serverKey: PublicKey
+        ): Boolean {
+            return true
+        }
+
+        override fun acceptModifiedServerKey(
+            clientSession: ClientSession?,
+            remoteAddress: SocketAddress?,
+            entry: KnownHostEntry?,
+            expected: PublicKey?,
+            actual: PublicKey?
+        ): Boolean {
+            val result = AtomicBoolean(false)
+            SwingUtilities.invokeAndWait { result.set(ask(remoteAddress, expected, actual) == JOptionPane.OK_OPTION) }
+            return result.get()
+        }
+
+        private fun ask(
+            remoteAddress: SocketAddress?,
+            expected: PublicKey?,
+            actual: PublicKey?
+        ): Int {
+            val formMargin = "7dlu"
+            val layout = FormLayout(
+                "default:grow",
+                "pref, 12dlu, pref, 4dlu, pref, 2dlu, pref, $formMargin, pref, $formMargin, pref, pref, 12dlu, pref"
+            )
+
+            val errorColor = if (FlatLaf.isLafDark()) UIManager.getColor("Component.warning.focusedBorderColor") else
+                UIManager.getColor("Component.error.focusedBorderColor")
+            val font = FontUtils.getCompositeFont("JetBrains Mono", Font.PLAIN, 12)
+            val artBox = Box.createHorizontalBox()
+            artBox.add(Box.createHorizontalGlue())
+            val expectedBox = Box.createVerticalBox()
+            for (line in KeyRandomArt(expected).toString().lines()) {
+                val label = JLabel(line)
+                label.font = font
+                expectedBox.add(label)
+            }
+            artBox.add(expectedBox)
+            artBox.add(Box.createHorizontalGlue())
+            val actualBox = Box.createVerticalBox()
+            for (line in KeyRandomArt(actual).toString().lines()) {
+                val label = JLabel(line)
+                label.foreground = errorColor
+                label.font = font
+                actualBox.add(label)
+            }
+            artBox.add(actualBox)
+            artBox.add(Box.createHorizontalGlue())
+
+            var rows = 1
+            val step = 2
+
+            // @formatter:off
+            val address = remoteAddress.toString().replace("/", StringUtils.EMPTY)
+            val panel = FormBuilder.create().layout(layout)
+                .add("<html><b>${I18n.getString("termora.host.modified-server-key.title", address)}</b></html>").xy(1, rows).apply { rows += step }
+                .add("${I18n.getString("termora.host.modified-server-key.thumbprint")}:").xy(1, rows).apply { rows += step }
+                .add("  ${I18n.getString("termora.host.modified-server-key.expected")}: ${KeyUtils.getFingerPrint(expected)}").xy(1, rows).apply { rows += step }
+                .add("<html>&nbsp;&nbsp;${I18n.getString("termora.host.modified-server-key.actual")}: <font color=rgb(${errorColor.red},${errorColor.green},${errorColor.blue})>${KeyUtils.getFingerPrint(actual)}</font></html>").xy(1, rows).apply { rows += step }
+                .addSeparator(StringUtils.EMPTY).xy(1, rows).apply { rows += step }
+                .add(artBox).xy(1, rows).apply { rows += step }
+                .addSeparator(StringUtils.EMPTY).xy(1, rows).apply { rows += 1 }
+                .add(I18n.getString("termora.host.modified-server-key.are-you-sure")).xy(1, rows).apply { rows += step }
+                .build()
+            // @formatter:on
+
+            return OptionPane.showConfirmDialog(
+                owner,
+                panel,
+                "SSH Security Warning",
+                messageType = JOptionPane.WARNING_MESSAGE,
+                optionType = JOptionPane.OK_CANCEL_OPTION
+            )
+
+        }
+    }
+
+    private class DialogServerKeyVerifier(
+        owner: Window,
+    ) : KnownHostsServerKeyVerifier(
+        MyDialogServerKeyVerifier(owner),
+        Paths.get(Application.getBaseDataDir().absolutePath, "known_hosts")
+    ) {
+        init {
+            modifiedServerKeyAcceptor = delegateVerifier as ModifiedServerKeyAcceptor
+        }
+
+        override fun updateKnownHostsFile(
+            clientSession: ClientSession?,
+            remoteAddress: SocketAddress?,
+            serverKey: PublicKey?,
+            file: Path?,
+            knownHosts: Collection<HostEntryPair?>?
+        ): KnownHostEntry? {
+            if (clientSession is JGitClientSession) {
+                if (isMiddleware(clientSession)) {
+                    return null
+                }
+            }
+            return super.updateKnownHostsFile(clientSession, remoteAddress, serverKey, file, knownHosts)
+        }
+    }
+
+
+    @Suppress("UNCHECKED_CAST")
+    private class MyJGitSshClient : JGitSshClient() {
+        companion object {
+            private val HOST_CONFIG_ENTRY: AttributeRepository.AttributeKey<HostConfigEntry> by lazy {
+                JGitSshClient::class.java.getDeclaredField("HOST_CONFIG_ENTRY").apply { isAccessible = true }
+                    .get(null) as AttributeRepository.AttributeKey<HostConfigEntry>
+            }
+            private const val CLIENT_PROXY_CONNECTOR = "ClientProxyConnectorId"
+        }
+
+        private val sshClient = this
+        private val clientProxyConnectors = ConcurrentHashMap<String, ClientProxyConnector>()
+
+
+        override fun createConnector(): IoConnector {
+            return MyIoConnector(this, super.createConnector())
+        }
+
+        override fun createSessionFactory(): SessionFactory {
+            return object : SessionFactory(sshClient) {
+                override fun doCreateSession(ioSession: IoSession): ClientSessionImpl {
+                    return object : JGitClientSession(sshClient, ioSession) {
+                        override fun getClientProxyConnector(): ClientProxyConnector? {
+                            val entry = getAttribute(HOST_CONFIG_ENTRY) ?: return null
+                            val clientProxyConnectorId = entry.getProperty(CLIENT_PROXY_CONNECTOR) ?: return null
+                            val clientProxyConnector = sshClient.clientProxyConnectors[clientProxyConnectorId]
+
+                            if (clientProxyConnector != null) {
+                                addSessionListener(object : SessionListener {
+                                    override fun sessionClosed(session: Session) {
+                                        clientProxyConnectors.remove(clientProxyConnectorId)
+                                    }
+                                })
+                            }
+
+                            return clientProxyConnector
+                        }
+
+                        override fun createShellChannel(
+                            ptyConfig: PtyChannelConfigurationHolder?,
+                            env: MutableMap<String, *>?
+                        ): ChannelShell {
+                            if (inCipher is CipherNone || outCipher is CipherNone)
+                                throw IllegalStateException("Interactive channels are not supported with none cipher")
+                            val channel = app.termora.x11.ChannelShell(ptyConfig, env)
+                            val id = connectionService.registerChannel(channel)
+                            if (log.isDebugEnabled) {
+                                log.debug("createShellChannel({}) created id={} - PTY={}", this, id, ptyConfig)
+                            }
+                            return channel
+                        }
+
+                    }
+                }
+            }
+        }
+
+        override fun setClientProxyConnector(proxyConnector: ClientProxyConnector?) {
+            throw UnsupportedOperationException()
+        }
+
+        private class MyIoConnector(private val sshClient: MyJGitSshClient, private val ioConnector: IoConnector) :
+            IoConnector {
+            override fun close(immediately: Boolean): CloseFuture {
+                return ioConnector.close(immediately)
+            }
+
+            override fun addCloseFutureListener(listener: SshFutureListener<CloseFuture>?) {
+                return ioConnector.addCloseFutureListener(listener)
+            }
+
+            override fun removeCloseFutureListener(listener: SshFutureListener<CloseFuture>?) {
+                return ioConnector.removeCloseFutureListener(listener)
+            }
+
+            override fun isClosed(): Boolean {
+                return ioConnector.isClosed
+            }
+
+            override fun isClosing(): Boolean {
+                return ioConnector.isClosing
+            }
+
+            override fun getIoServiceEventListener(): IoServiceEventListener {
+                return ioConnector.ioServiceEventListener
+            }
+
+            override fun setIoServiceEventListener(listener: IoServiceEventListener?) {
+                return ioConnector.setIoServiceEventListener(listener)
+            }
+
+            override fun getManagedSessions(): MutableMap<Long, IoSession> {
+                return ioConnector.managedSessions
+            }
+
+            override fun connect(
+                targetAddress: SocketAddress,
+                context: AttributeRepository?,
+                localAddress: SocketAddress?
+            ): IoConnectFuture {
+                var tAddress = targetAddress
+                val entry = context?.getAttribute(HOST_CONFIG_ENTRY)
+                if (entry != null) {
+                    val host = hostManager.getHost(entry.getProperty("Host") ?: StringUtils.EMPTY)
+                    if (host != null) {
+                        tAddress = configureProxy(entry, host, tAddress)
+                    }
+                }
+                return ioConnector.connect(tAddress, context, localAddress)
+            }
+
+            private fun configureProxy(
+                entry: HostConfigEntry,
+                host: Host,
+                targetAddress: SocketAddress
+            ): SocketAddress {
+                if (host.proxy.type == ProxyType.No) return targetAddress
+                val address = targetAddress as? InetSocketAddress ?: return targetAddress
+                if (address.hostString == (SshdSocketAddress.LOCALHOST_IPV4)) return targetAddress
+
+                // 获取代理连接器
+                val clientProxyConnector = getClientProxyConnector(host, address) ?: return targetAddress
+
+                val id = UUID.randomUUID().toSimpleString()
+                entry.setProperty(CLIENT_PROXY_CONNECTOR, id)
+                sshClient.clientProxyConnectors[id] = clientProxyConnector
+
+                return InetSocketAddress(host.proxy.host, host.proxy.port)
+            }
+
+            private fun getClientProxyConnector(
+                host: Host,
+                remoteAddress: InetSocketAddress
+            ): AbstractClientProxyConnector? {
+                if (host.proxy.type == ProxyType.HTTP) {
+                    return HttpClientConnector(
+                        InetSocketAddress(host.proxy.host, host.proxy.port),
+                        remoteAddress,
+                        host.proxy.username.ifBlank { null },
+                        if (host.proxy.password.isBlank()) null else host.proxy.password.toCharArray()
+                    )
+                } else if (host.proxy.type == ProxyType.SOCKS5) {
+                    return Socks5ClientConnector(
+                        InetSocketAddress(host.proxy.host, host.proxy.port),
+                        remoteAddress,
+                        host.proxy.username.ifBlank { null },
+                        if (host.proxy.password.isBlank()) null else host.proxy.password.toCharArray()
+                    )
+                }
+                return null
+            }
+
+        }
+
+
+    }
+
 }
+

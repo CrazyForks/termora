@@ -2,10 +2,12 @@ package app.termora.terminal.panel.vw
 
 import app.termora.*
 import com.formdev.flatlaf.extras.components.FlatToolBar
+import com.formdev.flatlaf.util.SystemInfo
 import java.awt.*
 import java.awt.event.*
 import java.beans.PropertyChangeEvent
 import java.beans.PropertyChangeListener
+import javax.imageio.ImageIO
 import javax.swing.*
 import kotlin.math.max
 import kotlin.math.min
@@ -333,6 +335,15 @@ open class VisualWindowPanel(protected val id: String, protected val visualWindo
             title = getWindowTitle()
             isAlwaysOnTop = isAlwaysTop
 
+            if (SystemInfo.isWindows || SystemInfo.isLinux) {
+                val sizes = listOf(16, 20, 24, 28, 32, 48, 64)
+                val loader = TermoraFrame::class.java.classLoader
+                val images = sizes.mapNotNull { e ->
+                    loader.getResourceAsStream("icons/termora_${e}x${e}.png")?.use { ImageIO.read(it) }
+                }
+                iconImages = images
+            }
+
             initEvents()
 
             init()
@@ -373,5 +384,9 @@ open class VisualWindowPanel(protected val id: String, protected val visualWindo
         override fun createSouthPanel(): JComponent? {
             return null
         }
+    }
+
+    override fun getWindowName(): String {
+        return id
     }
 }
